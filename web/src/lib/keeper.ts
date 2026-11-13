@@ -20,6 +20,17 @@ export type Game = { eventTicker: string; game: string; startTime: number; teams
 
 export type GamesReply = { leagues: League[]; league: string; games: Game[]; fetchedAt: number };
 
+/** One window of a 5-minute crypto market, from the keeper's test-loop helper. */
+export type IntervalWindow = {
+  eventTicker: string;
+  eventTitle: string;
+  instrumentSymbol: string;
+  /** Unix seconds. */
+  closeTime: number;
+  bestAsk: string | null;
+  quotable: boolean;
+};
+
 /** The words for the card, built by the keeper from Gemini's teams. */
 export type Display = {
   game: string;
@@ -182,6 +193,9 @@ const query = (req: PriceRequest): string =>
 export const keeper = {
   games: (league?: string, signal?: AbortSignal) =>
     call<GamesReply>(`/games${league ? `?league=${encodeURIComponent(league)}` : ""}`, undefined, signal),
+
+  /** The next 5-minute BTC windows: the test loop, never offered to a merchant. */
+  intervals: (signal?: AbortSignal) => call<{ windows: IntervalWindow[] }>("/intervals?series=BTC05M", undefined, signal),
 
   /** The price of a promo, unsigned. Needs no login. */
   price: (req: PriceRequest, signal?: AbortSignal) => call<Price>(`/price?${query(req)}`, undefined, signal),

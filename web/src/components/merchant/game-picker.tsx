@@ -2,11 +2,11 @@
 
 // Step 1 of the merchant form: which game, which team. One tap picks both. This is Gemini's game card
 // with the Yes and No buttons removed: a merchant picks a team, not a side of a market.
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { dayHeading, pct, timeOf } from "@/lib/format";
-import { keeper, type Game, type GamesReply, type GameTeam } from "@/lib/keeper";
+import { keeper, type Game, type GamesReply, type GameTeam, type IntervalWindow } from "@/lib/keeper";
 import { useNow } from "@/lib/use-now";
 
 export type Pick = { game: Game; team: GameTeam };
@@ -23,6 +23,43 @@ const LEAGUES = [
 ];
 const FIRST_SHOWN = 8;
 
+// The build's test loop: with `?dev=1` in the address there is one more tab, 5-minute BTC markets,
+// which settle in minutes where a game takes hours. It is never visible otherwise.
+const CRYPTO = { key: "btc05m", name: "Crypto 5-min" };
+const noop = () => () => {};
+const useDev = () =>
+  useSyncExternalStore(
+    noop,
+    () => new URLSearchParams(window.location.search).get("dev") === "1",
+    () => false,
+  );
+
+/** A 5-minute window in the shape of a game with one side, "Up". */
+const windowAsGame = (w: IntervalWindow): Game => ({
+  eventTicker: w.eventTicker,
+  game: w.eventTitle,
+  startTime: w.closeTime,
+  teams: [
+    {
+      instrumentSymbol: w.instrumentSymbol,
+      team: "Up",
+      condition: `${w.eventTitle} is Up`,
+      chance: w.bestAsk === null ? null : Number(w.bestAsk),
+      quotable: w.quotable && Number(w.bestAsk) < 0.95,
+    },
+  ],
+});
+
+const loadGames = (league: string, signal: AbortSignal): Promise<GamesReply> =>
+  league === CRYPTO.key
+    ? keeper.intervals(signal).then(({ windows }) => ({
+        leagues: LEAGUES,
+        league,
+        games: windows.map(windowAsGame),
+        fetchedAt: Math.floor(Date.now() / 1000),
+      }))
+    : keeper.games(league, signal);
+
 export function GamePicker({ picked, onPick }: Props) {
   const [league, setLeague] = useState(LEAGUES[0]!.key);
   const [reply, setReply] = useState<GamesReply | null>(null);
@@ -30,11 +67,12 @@ export function GamePicker({ picked, onPick }: Props) {
   const [search, setSearch] = useState("");
   const [showAll, setShowAll] = useState(false);
   const now = useNow(60_000);
+  const dev = useDev();
 
   useEffect(() => {
     const controller = new AbortController();
     const load = () =>
-      keeper.games(league, controller.signal).then(
+      loadGames(league, controller.signal).then(
         (games) => {
           setReply(games);
           setFailed(null);
@@ -45,14 +83,14 @@ export function GamePicker({ picked, onPick }: Props) {
       );
     load();
     // Chances on the buttons are refreshed quietly; the price card below has the live one.
-    const timer = window.setInterval(load, 60_000);
+    const timer = window.setInterval(load, league === CRYPTO.key ? 20_000 : 60_000);
     return () => {
       controller.abort();
       window.clearInterval(timer);
     };
   }, [league]);
 
-  const leagues = reply?.leagues ?? LEAGUES;
+  const leagues = [...(reply?.leagues ?? LEAGUES), ...(dev ? [CRYPTO] : [])];
   const loaded = reply && reply.league === league ? reply.games : null;
   const words = search.trim().toLowerCase();
   const matching = (loaded ?? []).filter(
