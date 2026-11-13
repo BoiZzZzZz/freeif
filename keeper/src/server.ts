@@ -79,6 +79,8 @@ export function makeApp(d: Deps): Hono {
       oracle: d.oracle,
       relayer: d.relayer.address,
       block: Number(block),
+      // The commit this build was made from, when the host says (Railway does). Null on a laptop.
+      commit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? null,
     });
   });
 

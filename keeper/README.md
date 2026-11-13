@@ -38,7 +38,7 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 
 | Route | What it does |
 |---|---|
-| `GET /health` | The vault, the three service addresses, the latest block |
+| `GET /health` | The vault, the three service addresses, the latest block, and the commit the hosted build was made from |
 | `GET /health/rpc` | Whether each RPC endpoint answers, and how fast |
 | `GET /price?eventTicker=&instrumentSymbol=&payoutPerClaim=&maxClaims=&claimDeadline=` | The price of a promo, unsigned. `breakdown` has `chance`, `mostOwed`, `fee` and `cost`; `maxCustomers` is the most the vault can cover right now; `limit` is `ok` or the limit the request is over |
 | `POST /quote` | Body: the same fields plus `merchant` (and `hedgeMode`). Returns the price plus `quote` and `signature` for `createPromo(quote, signature)`. Good for 90 seconds, for that merchant only. Answers 422 with a reason when the vault cannot take the promo |
