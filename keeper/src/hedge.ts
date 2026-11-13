@@ -175,9 +175,10 @@ export class Hedger {
   }
 
   /**
-   * One look at the promos the loop has just read. An open promo with no hedge gets one; a promo that
-   * is over has its resting order cancelled. It never throws, and a call that comes while the last one
-   * is still talking to Gemini does nothing: the settlement loop does not wait for this.
+   * One look at the promos the loop has just read, which is every promo that is not finished. An open
+   * promo with no hedge gets one; a promo that is over has its resting order cancelled. It never throws,
+   * and a call that comes while the last one is still talking to Gemini does nothing: the settlement loop
+   * does not wait for this.
    */
   async sync(promos: readonly HedgePromo[]): Promise<void> {
     if (this.#busy) return;
@@ -190,6 +191,17 @@ export class Hedger {
           else if (FINAL.includes(promo.status) && held?.kind === "sandbox" && held.closedAt === undefined) await this.#close(promo.promoId, held);
         } catch (err) {
           this.#log(`promo ${promo.promoId}: ${(err as Error).message}`);
+        }
+      }
+      // The loop reads a finished promo once and then never again. An order that was not closed on that
+      // pass (Gemini was down, the keeper restarted) belongs to a promo that is no longer in the list.
+      const read = new Set(promos.map((p) => p.promoId));
+      for (const [promoId, held] of Object.entries(this.#d.store.data.hedges)) {
+        if (read.has(promoId) || held.kind !== "sandbox" || held.closedAt !== undefined) continue;
+        try {
+          await this.#close(promoId, held);
+        } catch (err) {
+          this.#log(`promo ${promoId}: ${(err as Error).message}`);
         }
       }
     } finally {
@@ -237,13 +249,16 @@ export class Hedger {
   async #close(promoId: string, held: Hedge): Promise<void> {
     const { store, sandbox } = this.#d;
     if (sandbox === null || held.orderId === undefined) return;
-    let status = "cancelled";
-    try {
-      await sandbox.cancel(held.orderId);
-    } catch (err) {
-      // An order on a market that has closed is gone already. Anything else is tried again next pass.
-      if (!(err instanceof SandboxError) || err.status < 400 || err.status >= 500) throw err;
-      status = "closed";
+    // An order Gemini filled is a position, not an order: there is nothing left to cancel.
+    let status = held.status === "filled" ? "filled" : "cancelled";
+    if (status !== "filled") {
+      try {
+        await sandbox.cancel(held.orderId);
+      } catch (err) {
+        // An order on a market that has closed is gone already. Anything else is tried again next pass.
+        if (!(err instanceof SandboxError) || err.status < 400 || err.status >= 500) throw err;
+        status = "closed";
+      }
     }
     store.data.hedges[promoId] = { ...held, status, closedAt: this.#now() };
     store.save();

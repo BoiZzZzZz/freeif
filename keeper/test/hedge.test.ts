@@ -265,6 +265,31 @@ test("sync_anOrderThatWentWithItsMarket_isClosed_notAnError", async () => {
   assert.equal(again.store.data.hedges["14"]!.status, "cancelled");
 });
 
+test("sync_anOrderGeminiFilled_staysFilled_andIsNotCancelled", async () => {
+  // Seen on promo 15: the sandbox had an offer at the price, and the order came back "filled".
+  const { hedger, store, calls, clock, btc } = setup();
+  store.data.hedges["14"] = { kind: "sandbox", symbol: "GEMI-BTC05M2611131710-UP", quantity: "1.5", price: "0.26", at: NOW, orderId: "145853902318667186", status: "filled" };
+  clock.now = NOW + 300;
+  await hedger.sync([btc(Status.FinalizedNo)]);
+  assert.deepEqual(calls, []);
+  assert.deepEqual([store.data.hedges["14"]!.status, store.data.hedges["14"]!.closedAt], ["filled", NOW + 300]);
+});
+
+test("sync_anOrderWhosePromoIsNoLongerRead_isClosedToo", async () => {
+  // The loop reads a finished promo once. If the keeper restarted on that pass, the promo is simply
+  // missing from every later one.
+  const { hedger, store, calls, btc, game } = setup();
+  store.data.oddsStart["14"] = [NOW, 5000, 4900, 5000];
+  await hedger.sync([btc()]);
+  store.data.odds["9"] = [[NOW, 4300, 4200, 4300]];
+  await hedger.sync([game()]);
+  assert.deepEqual(calls.slice(1), ["buy 16 GEMI-NFL-2611151430-NE-DET-M-NE at 0.43 as freeif-9-" + NOW, "cancel 145853902318663971"]);
+  assert.equal(store.data.hedges["14"]!.status, "cancelled");
+  // Once closed it is left alone.
+  await hedger.sync([game()]);
+  assert.equal(calls.length, 3);
+});
+
 test("sync_aSimulatedHedge_hasNothingToCancel", async () => {
   const { hedger, store, calls, game } = setup();
   store.data.odds["9"] = [[NOW - 30, 4300, 4200, 4300]];
