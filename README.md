@@ -21,6 +21,21 @@ Built for the UBC Hackathon 2026 (DeFi track). Work in progress: this README gro
 | Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
 | First payout | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
 
+## How Gemini is used
+
+Gemini's prediction markets supply three things: the price of a promo, the picture of how that price moves, and the result. All of it is public market data read by the keeper (`keeper/src/gemini.ts`); no key is needed.
+
+| What for | Route | What is read |
+|---|---|---|
+| The games a merchant can pick | `GET /v1/prediction-markets/events?status=active&search=NFL` (one league at a time) | Events whose ticker ends in `-M` (the game's winner): `startTime`, `participants`, `subcategory`, and for each contract `sportsSide`, `prices.bestBid` and `prices.bestAsk` |
+| The price of a promo | `GET /v1/prediction-markets/events/{eventTicker}` | The event's `status`; the contract's `marketState`, `prices.bestBid`, `prices.bestAsk`, `prices.lastTradePrice`, `expiryDate`, and `description` (the rule the result is decided by, shown word for word under Proof) |
+| How the chance has moved | `GET /v1/book/{instrumentSymbol}?limit_bids=1&limit_asks=1`, every 30 seconds for each open promo | The best bid and the best ask. The promo page draws them as its chart, from the price the promo was sold at to the newest reading (`GET /promos/:id/odds` on the keeper) |
+| The result | `GET /v1/prediction-markets/events/{eventTicker}` once the promo has stopped taking customers | The contract's `resolutionSide`, `yes` or `no`, and the event's `id` |
+
+- **The price.** A promo costs `ask × payout × customers`, plus 5%. The ask is used because it is what a hedge would cost. That holds while the book is a market: someone on each side, at most half a dollar apart. A book with a side missing is priced on the highest price it shows with 15% on top, and only if the result has traded; an offer with nobody on the other side and no trade behind it is not a price. The rules are in [`keeper/README.md`](keeper/README.md), "Pricing rules".
+- **The result, and how to check it.** The vault stores the hash of Gemini's event id and of the contract's symbol when the promo is created. `settle(promoId, outcomeYes, eventId, resolutionSide)` reverts unless the event id it is given hashes to the stored one, so a result can only be posted for the event the promo was sold on. To check a promo: open its page, open Proof, follow "Gemini event" to Gemini's own answer for that event, and compare the contract's `resolutionSide` with the `Settled` event of "Settlement on Arc".
+- **One contract per promo.** A promo names exactly one Gemini contract. Nothing in the vault or the pricing assumes sports: the test loop runs on 5-minute BTC markets.
+
 ## The QuickNode Stream
 
 The promo page and the customer's card are live: a line appears when a customer is covered, when the result is posted, when each customer is paid. Those are events on the vault, and a QuickNode Stream is how they get from the chain to the page.
