@@ -11,7 +11,7 @@ import { createPublicClient, erc20Abi, http, isAddress, type Address } from "vie
 import { promoVaultAbi } from "./abi.ts";
 import { CHAIN_ID, rpcUrls } from "./config.ts";
 import { Status, arcTestnet, statusName, type PublicClient } from "./chain.ts";
-import { LEAGUES, type Games } from "./games.ts";
+import { LEAGUES, WEATHER, type Games } from "./games.ts";
 import type { Odds } from "./odds.ts";
 import { getEvent, priceToBps, upcomingIntervalTickers } from "./gemini.ts";
 import { cleanText, findLabel } from "./labels.ts";
@@ -155,7 +155,10 @@ export function makeApp(d: Deps): Hono {
 
   app.onError((err, c) => {
     if (err instanceof Refusal) {
-      return c.json({ error: { code: err.code, message: err.message, maxCustomers: err.maxCustomers } }, 422);
+      return c.json(
+        { error: { code: err.code, message: err.message, maxCustomers: err.maxCustomers, maxPayout: err.maxPayout?.toString() } },
+        422,
+      );
     }
     if (err instanceof ClaimRefusal) {
       return c.json({ error: { code: err.code, message: err.message } }, CLAIM_STATUS[err.code] ?? 422);
@@ -265,6 +268,10 @@ export function makeApp(d: Deps): Hono {
     const leagues = LEAGUES.map(({ key, name }) => ({ key, name }));
     return c.json({ leagues, ...(await d.games.list(league)) });
   });
+
+  // Step 1 of the form in hedge mode ("My business gets paid"): Gemini's daily high-temperature markets
+  // whose day has not begun, in the shape of `/games`. Each city and day is a "game", each range a "team".
+  app.get("/weather", async (c) => c.json(await d.games.list(WEATHER)));
 
   // Registers a customer on a promo. `userToken` is the customer's Circle login: the relayer asks Circle
   // whose it is. One claim per Circle user per promo, for an address that is one of that user's wallets.
@@ -394,6 +401,8 @@ export function makeApp(d: Deps): Hono {
         marketCloseTime: Number(p.marketCloseTime),
         settledAt: Number(p.settledAt),
         outcomeYes: p.outcomeYes,
+        /** True for a promo that pays the business itself: one payout, taken when it was made. */
+        hedgeMode: p.hedgeMode,
         net: net === null ? null : net.toString(),
         /** The promo's hedge: an order on Gemini's sandbox exchange, or the order the keeper would place. */
         hedge: d.store.data.hedges[raw] ?? null,

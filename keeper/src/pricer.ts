@@ -6,6 +6,7 @@ import { promoVaultAbi } from "./abi.ts";
 import { quoteDomain, quoteToJson, quoteTypes, type PublicClient, type Quote } from "./chain.ts";
 import {
   contractsToUnits,
+  eventStart,
   getDepth,
   getEvent,
   isIntervalMarket,
@@ -70,12 +71,18 @@ export type RefusalCode =
 export class Refusal extends Error {
   code: RefusalCode;
   maxCustomers?: number;
-  constructor(code: RefusalCode, message: string, maxCustomers?: number) {
+  /** With "over-capacity" in hedge mode: the most the vault could pay on this result, in base units. */
+  maxPayout?: bigint;
+  constructor(code: RefusalCode, message: string, maxCustomers?: number, maxPayout?: bigint) {
     super(message);
     this.code = code;
     this.maxCustomers = maxCustomers;
+    this.maxPayout = maxPayout;
   }
 }
+
+/** 12010000 -> "$12.01". */
+const dollars = (units: bigint): string => `$${units / 1_000_000n}.${((units % 1_000_000n) / CENT).toString().padStart(2, "0")}`;
 
 type Timing = { quoteTtlSeconds: number; intervalCutoffSeconds: number; minClaimWindowSeconds: number };
 
@@ -169,6 +176,11 @@ export class Pricer {
     const p = await this.#prepare(req);
     if (p.limit === "too-likely") {
       throw new Refusal("too-likely", "This result is too likely to offer as a promotion.");
+    }
+    if (p.limit !== "ok" && hedgeMode) {
+      // One payout to the business itself: what the vault can cover is an amount, not a head count.
+      const message = p.maxPayout > 0n ? `We can cover up to ${dollars(p.maxPayout)} on this right now.` : "We cannot cover this right now.";
+      throw new Refusal("over-capacity", message, p.maxCustomers, p.maxPayout);
     }
     if (p.limit !== "ok") {
       const n = p.maxCustomers;
@@ -267,7 +279,9 @@ export class Pricer {
     const { intervalCutoffSeconds, minClaimWindowSeconds } = this.#d.timing;
     const marketCloseTime = toUnix(contract.expiryDate ?? event.expiryDate);
     const interval = isIntervalMarket(event);
-    const latest = interval || !event.startTime ? marketCloseTime - intervalCutoffSeconds : toUnix(event.startTime);
+    // A game is sold until kickoff, a temperature market until its day begins.
+    const start = eventStart(event);
+    const latest = interval || start === null ? marketCloseTime - intervalCutoffSeconds : start;
     if (now >= latest) throw new Refusal("event-started", "This event has already started.");
 
     let claimDeadline = latest;

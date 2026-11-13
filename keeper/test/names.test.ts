@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address, Hex } from "viem";
 import type { Quote } from "../src/chain.ts";
-import { Games, LEAGUES, toGames } from "../src/games.ts";
-import { ruleText, type GeminiContract, type GeminiEvent } from "../src/gemini.ts";
+import { Games, LEAGUES, WEATHER, toGames, toWeather } from "../src/games.ts";
+import { eventStart, ruleText, type GeminiContract, type GeminiEvent } from "../src/gemini.ts";
 import { cleanText, findLabel, pendingLabel, prunePending, type PendingLabel, type PromoKey } from "../src/labels.ts";
 import { displayNames, nickname } from "../src/names.ts";
 
@@ -54,6 +54,34 @@ const college = (): GeminiEvent => ({
   contracts: [side("North Carolina", "home", "0.62", "0.63"), side("Georgia", "away", "0.36", "0.37")],
 });
 
+// Gemini's Austin market for Nov 14 as it was listed on Nov 13: no start time, no teams, a contract per
+// two-degree range, closing at 04:59:59 UTC the next day. `closeIn` is how far away that close is.
+const range = (ticker: string, label: string, bid?: string, ask?: string): GeminiContract => ({
+  id: ticker,
+  label,
+  instrumentSymbol: `GEMI-WXHIGH-AUS-2611150459-${ticker}`,
+  marketState: "open",
+  prices: { bestBid: bid, bestAsk: ask },
+});
+const austin = (closeIn: number, over: Partial<GeminiEvent> = {}): GeminiEvent => ({
+  id: "456364",
+  ticker: "WXHIGH-AUS-2611150459",
+  title: "Highest temperature in Austin on November 14, 2026?",
+  category: "Weather",
+  status: "active",
+  series: "WXHIGH",
+  expiryDate: iso(NOW + closeIn),
+  subcategory: { name: "Daily Temperature" },
+  participants: [],
+  contracts: [
+    range("69TO70", "69°F to 70°F", "0.14", "0.22"),
+    range("LO66", "66°F or below", "0.32", "0.37"),
+    range("HI75", "75°F or above", undefined, "0.01"),
+    range("67TO68", "67°F to 68°F", "0.23", "0.33"),
+  ],
+  ...over,
+});
+
 test("nickname_isWhatIsLeftOfTheFullNameAfterTheSharedWords", () => {
   assert.equal(nickname("Miami", "Miami Heat"), "Heat");
   assert.equal(nickname("New York R", "New York Rangers"), "Rangers");
@@ -100,6 +128,76 @@ test("displayNames_notAGame_keepsGeminisTitle", () => {
   assert.equal(names.subject, "");
   assert.equal(names.condition, "BTC price today at 12:15am EST is Up");
   assert.equal(names.startTime, null);
+});
+
+test("displayNames_dailyHigh_namesTheCityTheDayAndTheRange", () => {
+  const event = austin(30 * 3600);
+  const d = displayNames(event, event.contracts[1]!);
+  assert.equal(d.game, "Austin high on November 14");
+  assert.equal(d.team, "66°F or below");
+  assert.equal(d.condition, "the high in Austin on November 14 is 66°F or below");
+  // Not a game: the pages do not say "win" or "lose" about it.
+  assert.equal(d.subject, "");
+  assert.equal(d.league, "Daily Temperature");
+  // Its day begins 24 hours before it closes.
+  assert.equal(d.startTime, NOW + 6 * 3600);
+  // A title Gemini words another way keeps Gemini's words.
+  const odd = austin(30 * 3600, { title: "Austin high temp" });
+  assert.equal(displayNames(odd, odd.contracts[1]!).condition, "Austin high temp is 66°F or below");
+});
+
+test("eventStart_isKickoff_orTheStartOfATemperatureMarketsDay", () => {
+  assert.equal(eventStart(nba()), NOW + 3600);
+  assert.equal(eventStart(austin(30 * 3600)), NOW + 6 * 3600);
+  // Anything else with no start time has none.
+  assert.equal(eventStart({ ticker: "GOLD-2611132200", expiryDate: iso(NOW + 3600) }), null);
+});
+
+test("toWeather_listsEachCityAndDay_rangesFromTheColdestUp", () => {
+  const dallas = austin(30 * 3600, { id: "9", ticker: "WXHIGH-DFW-2611150459", title: "Highest temperature in Dallas on November 14, 2026?" });
+  const [first, second] = toWeather([dallas, austin(30 * 3600), austin(30 * 3600)], NOW, rules);
+  assert.deepEqual([first!.game, first!.city, first!.day], ["Austin high on November 14", "Austin", "November 14"]);
+  assert.equal(second!.city, "Dallas");
+  assert.equal(first!.startTime, NOW + 6 * 3600);
+  assert.deepEqual(
+    first!.teams.map((t) => [t.team, t.chance, t.quotable]),
+    [
+      ["66°F or below", 0.37, true],
+      ["67°F to 68°F", 0.33, true],
+      ["69°F to 70°F", 0.22, true],
+      // An offer of a cent with nobody bidding is not a 1% chance.
+      ["75°F or above", 0.01, false],
+    ],
+  );
+  assert.equal(first!.teams[0]!.condition, "the high in Austin on November 14 is 66°F or below");
+});
+
+test("toWeather_aDayThatHasBegun_orWithNoPrice_isLeftOut", () => {
+  // The market closes in 20 hours: its day began four hours ago and the high is being measured.
+  assert.deepEqual(toWeather([austin(20 * 3600)], NOW, rules), []);
+  assert.equal(toWeather([austin(24 * 3600 + 30)], NOW, rules).length, 1);
+  assert.deepEqual(toWeather([austin(24 * 3600 + 29)], NOW, rules), []);
+  // Most cities' books are one-sided on every range.
+  const empty = austin(30 * 3600);
+  for (const c of empty.contracts) c.prices = { bestAsk: "0.02" };
+  assert.deepEqual(toWeather([empty], NOW, rules), []);
+  assert.deepEqual(toWeather([austin(30 * 3600, { status: "under_review" })], NOW, rules), []);
+});
+
+test("Games_weather_readsGeminisWeatherCategory", async () => {
+  const asked: string[] = [];
+  const games = new Games({
+    ...rules,
+    now: () => NOW,
+    fetchPage: async (search, offset) => {
+      asked.push(`${search}@${offset}`);
+      return { data: [austin(30 * 3600), austin(20 * 3600, { id: "8", ticker: "WXHIGH-AUS-2611140459" })], pagination: { total: 2 } };
+    },
+  });
+  const list = await games.list(WEATHER);
+  assert.deepEqual(asked, ["WXHIGH@0"]);
+  assert.equal(list.league, "weather");
+  assert.deepEqual(list.games.map((g) => g.eventTicker), ["WXHIGH-AUS-2611150459"]);
 });
 
 test("ruleText_flattensGeminisRichTextIntoOneLine", () => {

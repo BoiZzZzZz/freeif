@@ -1,20 +1,23 @@
 // The words a merchant and a customer read for a Gemini event: "Lions at Bears", "the Lions win".
 // Built from Gemini's own data, never from what a merchant types, so a promo's card cannot name a
 // different result from the one its contract settles on.
-import { toUnix, type GeminiContract, type GeminiEvent } from "./gemini.ts";
+import { eventStart, isDailyHigh, toUnix, type GeminiContract, type GeminiEvent } from "./gemini.ts";
+
+/** Gemini's title for a daily temperature market: the city, and the day without its year. */
+export const DAILY_HIGH = /^Highest temperature in (.+) on ([A-Z][a-z]+ \d{1,2})(?:, \d{4})?\??$/;
 
 export type Display = {
-  /** "Cavaliers at Heat" for a game; the event's title for anything else. */
+  /** "Cavaliers at Heat" for a game, "Austin high on November 14" for a temperature market; the event's title for anything else. */
   game: string;
-  /** The result as a short name: "Heat", "Georgia", "Up". */
+  /** The result as a short name: "Heat", "Georgia", "Up", "66°F or below". */
   team: string;
   /** The team as the subject of a sentence: "the Heat", "Georgia". Empty when the event is not a game. */
   subject: string;
-  /** What has to happen, to follow the words "free if": "the Heat win", "Georgia wins". */
+  /** What has to happen, to follow the word "if": "the Heat win", "Georgia wins", "the high in Austin on November 14 is 66°F or below". */
   condition: string;
   /** Gemini's league name, for example "Pro Basketball". Null when the event has none. */
   league: string | null;
-  /** Unix seconds the event starts. Null when Gemini gives no start time. */
+  /** Unix seconds the event starts: kickoff, or the start of a temperature market's day. Null when Gemini gives nothing to go by. */
   startTime: number | null;
 };
 
@@ -48,8 +51,23 @@ export function displayNames(event: GeminiEvent, contract: GeminiContract): Disp
   const startTime = event.startTime ? toUnix(event.startTime) : null;
   const team = shortName(event, contract);
 
+  const high = isDailyHigh(event) ? DAILY_HIGH.exec(event.title) : null;
+  if (high) {
+    // A city's high for one day: "Highest temperature in Austin on November 14, 2026?" with a contract
+    // per range ("66°F or below"). The day is a date in that city, so it is kept as Gemini wrote it.
+    const [, city, day] = high;
+    return {
+      game: `${city} high on ${day}`,
+      team,
+      subject: "",
+      condition: `the high in ${city} on ${day} is ${contract.label}`,
+      league,
+      startTime: eventStart(event),
+    };
+  }
+
   if (!contract.sportsSide) {
-    // Not a game: a crypto window, a temperature bucket. "BTC price today at 12:15am EST is Up".
+    // Not a game: a crypto window. "BTC price today at 12:15am EST is Up".
     return { game: event.title, team, subject: "", condition: `${event.title} is ${contract.label}`, league, startTime };
   }
 

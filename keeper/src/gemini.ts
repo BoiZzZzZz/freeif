@@ -153,6 +153,27 @@ export function contractsToUnits(amount: string): bigint | null {
   return BigInt(match[1]!) * 1_000_000n + BigInt((match[2] ?? "").padEnd(6, "0"));
 }
 
+/**
+ * A city's daily high temperature: `WXHIGH-AUS-2611150459`, "Highest temperature in Austin on November
+ * 14, 2026?", one contract per two-degree range. It closes at 04:59:59 UTC after its day (23:59:59 Eastern).
+ */
+export function isDailyHigh(event: Pick<GeminiEvent, "ticker">): boolean {
+  return event.ticker.startsWith("WXHIGH-");
+}
+
+const DAY_SECONDS = 86_400;
+
+/**
+ * When the thing an event is about begins, in unix seconds: kickoff for a game. A daily temperature
+ * market has no start time; its day begins 24 hours before it closes, at or shortly before midnight in
+ * its city, and from then on the result is being measured. Null when there is nothing to go by.
+ */
+export function eventStart(event: Pick<GeminiEvent, "ticker" | "startTime" | "expiryDate">): number | null {
+  if (event.startTime) return toUnix(event.startTime);
+  if (isDailyHigh(event)) return toUnix(event.expiryDate) - DAY_SECONDS;
+  return null;
+}
+
 const INTERVAL_TICKER =/^([A-Z]+)(05|15)M(\d{10})$/;
 
 /** 5 and 15-minute crypto markets. They are the test loop: quotable while the window is running. */

@@ -5,9 +5,9 @@
 // own event, a page of 100 is 3 to 12 MB, and the list for all sports leaves pro football out. So the
 // keeper asks league by league with Gemini's `search` filter, keeps only the winner markets, and holds
 // each league's list in memory. A list that has gone old is served as it is while a new one is read.
-import { listEvents, priceToBps, toUnix, type GeminiEvent } from "./gemini.ts";
+import { eventStart, isDailyHigh, listEvents, priceToBps, toUnix, type GeminiContract, type GeminiEvent } from "./gemini.ts";
 import { isMarket } from "./pricing.ts";
-import { displayNames } from "./names.ts";
+import { DAILY_HIGH, displayNames } from "./names.ts";
 
 /** The tabs of the form, in order. `search` is the start of Gemini's tickers for the league. */
 export const LEAGUES = [
@@ -17,7 +17,14 @@ export const LEAGUES = [
   { key: "ncaaf", name: "College Football", search: "NCAAF" },
   { key: "ncaam", name: "College Basketball", search: "NCAAM" },
 ] as const;
-export type League = (typeof LEAGUES)[number];
+/** One list the keeper holds: a league's games, or the temperature markets. */
+export type League = { key: string; name: string; search: string; weather?: boolean };
+
+/**
+ * Not a tab of the promo form: the list behind "My business gets paid" (hedge mode). Gemini's daily
+ * high-temperature markets, one per city and day, about a hundred of them in one page.
+ */
+export const WEATHER: League = { key: "weather", name: "Weather", search: "WXHIGH", weather: true };
 
 export type GameTeam = {
   instrumentSymbol: string;
@@ -33,11 +40,15 @@ export type GameTeam = {
 
 export type Game = {
   eventTicker: string;
-  /** "Cavaliers at Heat". */
+  /** "Cavaliers at Heat", or "Austin high on November 14". */
   game: string;
-  /** Unix seconds. */
+  /** Unix seconds: kickoff, or the start of a temperature market's day. A promo is sold until then. */
   startTime: number;
+  /** A game's two teams, or a temperature market's ranges from the coldest up. */
   teams: GameTeam[];
+  /** A temperature market's city and day, as Gemini writes them: "Austin", "November 14". */
+  city?: string;
+  day?: string;
 };
 
 type Page = { data: GeminiEvent[]; pagination: { total: number } };
@@ -70,6 +81,25 @@ export const isGameWinner = (event: Pick<GeminiEvent, "ticker">): boolean => eve
 const sideOf = (event: GeminiEvent, team: GameTeam): string | undefined =>
   event.contracts.find((c) => c.instrumentSymbol === team.instrumentSymbol)?.sportsSide;
 
+/** One result as a button of the form: its name, its chance, and whether a promo on it would be priced. */
+function teamOf(event: GeminiEvent, c: GeminiContract, rules: Rules): GameTeam {
+  const ask = priceToBps(c.prices?.bestAsk);
+  const bid = priceToBps(c.prices?.bestBid);
+  const open = c.marketState === undefined || c.marketState === "open";
+  // The same line as the pricing service's "too likely": the cost would be more than the payout.
+  const tooLikely = ask !== null && ask * (10_000 + rules.spreadBps) >= 10_000 * 10_000;
+  const names = displayNames(event, c);
+  return {
+    instrumentSymbol: c.instrumentSymbol,
+    team: names.team,
+    condition: names.condition,
+    chance: ask === null ? null : ask / 10_000,
+    // A price with nobody on the other side is not a chance: an empty book shows an ask of 0.02.
+    // The same rule as the pricing service: only a book that is a market is offered.
+    quotable: open && isMarket(bid, ask) && !tooLikely,
+  };
+}
+
 /** Turns Gemini's events into the form's list: winner markets only, not started, with a usable price. */
 export function toGames(events: GeminiEvent[], nowSeconds: number, rules: Rules): Game[] {
   const games: Game[] = [];
@@ -83,23 +113,7 @@ export function toGames(events: GeminiEvent[], nowSeconds: number, rules: Rules)
 
     const teams = event.contracts
       .filter((c) => c.sportsSide === "home" || c.sportsSide === "away")
-      .map((c): GameTeam => {
-        const ask = priceToBps(c.prices?.bestAsk);
-        const bid = priceToBps(c.prices?.bestBid);
-        const open = c.marketState === undefined || c.marketState === "open";
-        // The same line as the pricing service's "too likely": the cost would be more than the payout.
-        const tooLikely = ask !== null && ask * (10_000 + rules.spreadBps) >= 10_000 * 10_000;
-        const names = displayNames(event, c);
-        return {
-          instrumentSymbol: c.instrumentSymbol,
-          team: names.team,
-          condition: names.condition,
-          chance: ask === null ? null : ask / 10_000,
-          // A price with nobody on the other side is not a chance: an empty book shows an ask of 0.02.
-          // The same rule as the pricing service: only a book that is a market is offered.
-          quotable: open && isMarket(bid, ask) && !tooLikely,
-        };
-      });
+      .map((c) => teamOf(event, c, rules));
     if (teams.length < 2 || !teams.some((t) => t.quotable)) continue;
     // The away team first, as in "Cavaliers at Heat".
     teams.sort((a, b) => Number(sideOf(event, b) === "away") - Number(sideOf(event, a) === "away"));
@@ -108,6 +122,32 @@ export function toGames(events: GeminiEvent[], nowSeconds: number, rules: Rules)
     games.push({ eventTicker: event.ticker, game: names.game, startTime, teams });
   }
   return games.sort((a, b) => a.startTime - b.startTime);
+}
+
+/** "66°F or below" -> 66: the ranges of a temperature market are listed from the coldest up. */
+const degrees = (label: string): number => Number.parseInt(label, 10) || 0;
+
+/**
+ * Turns Gemini's daily temperature events into the same list: one entry per city and day whose day has
+ * not begun, each range as a "team". Soonest day first, then by city.
+ */
+export function toWeather(events: GeminiEvent[], nowSeconds: number, rules: Rules): Game[] {
+  const markets: Game[] = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    const start = eventStart(event);
+    const title = DAILY_HIGH.exec(event.title);
+    if (!isDailyHigh(event) || event.status !== "active" || start === null || !title || seen.has(event.ticker)) continue;
+    seen.add(event.ticker);
+    const lead = start - nowSeconds;
+    if (lead < rules.minLeadSeconds || lead > HORIZON_SECONDS) continue;
+
+    const teams = event.contracts.map((c) => teamOf(event, c, rules)).sort((a, b) => degrees(a.team) - degrees(b.team));
+    if (!teams.some((t) => t.quotable)) continue;
+    const names = displayNames(event, event.contracts[0]!);
+    markets.push({ eventTicker: event.ticker, game: names.game, startTime: start, teams, city: title[1], day: title[2] });
+  }
+  return markets.sort((a, b) => a.startTime - b.startTime || a.game.localeCompare(b.game));
 }
 
 export class Games {
@@ -145,7 +185,7 @@ export class Games {
 
   /** Reads every league once, one after the other, so the first visitor does not wait. */
   async prewarm(): Promise<void> {
-    for (const league of LEAGUES) {
+    for (const league of [...LEAGUES, WEATHER]) {
       try {
         await this.#refresh(league);
       } catch (err) {
@@ -183,7 +223,7 @@ export class Games {
     const fetchPage =
       this.#d.fetchPage ??
       ((search: string, offset: number, limit: number) =>
-        listEvents({ status: "active", category: "Sports", search, limit, offset }));
+        listEvents({ status: "active", category: league.weather ? "Weather" : "Sports", search, limit, offset }));
     const now = this.#now();
     const events: GeminiEvent[] = [];
     for (let page = 0; page < MAX_PAGES; page++) {
@@ -199,11 +239,14 @@ export class Games {
       }
       const { data, pagination } = result;
       // "NBA" also finds "WNBA..." season markets; a game's ticker starts with the league and a dash.
-      events.push(...data.filter((e) => e.ticker.startsWith(`${league.search}-`) && isGameWinner(e)));
+      events.push(...data.filter((e) => e.ticker.startsWith(`${league.search}-`) && (league.weather ? isDailyHigh(e) : isGameWinner(e))));
       // Past the last game worth listing: season-long markets have no start time and come last.
-      const pastHorizon = data.every((e) => !e.startTime || toUnix(e.startTime) - now > HORIZON_SECONDS);
+      const pastHorizon = data.every((e) => {
+        const start = eventStart(e);
+        return start === null || start - now > HORIZON_SECONDS;
+      });
       if (data.length < PAGE || (page + 1) * PAGE >= pagination.total || pastHorizon) break;
     }
-    return toGames(events, now, this.#d);
+    return league.weather ? toWeather(events, now, this.#d) : toGames(events, now, this.#d);
   }
 }

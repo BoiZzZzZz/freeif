@@ -357,6 +357,64 @@ test("signQuote_hedgeMode_needsExactlyOneClaim", async () => {
   assert.equal(res.quote.hedgeMode, true);
 });
 
+// Gemini's Austin market: no start time, closing 04:59:59 UTC after its day.
+const austin = (closeIn: number): GeminiEvent => ({
+  id: "456364",
+  ticker: "WXHIGH-AUS-2611150459",
+  title: "Highest temperature in Austin on November 14, 2026?",
+  category: "Weather",
+  status: "active",
+  expiryDate: iso(NOW + closeIn),
+  subcategory: { name: "Daily Temperature" },
+  contracts: [
+    {
+      id: "456364-1129950",
+      label: "66°F or below",
+      instrumentSymbol: "GEMI-WXHIGH-AUS-2611150459-LO66",
+      marketState: "open",
+      expiryDate: iso(NOW + closeIn),
+      prices: { bestBid: "0.32", bestAsk: "0.37" },
+    },
+  ],
+});
+const cover = { eventTicker: "WXHIGH-AUS-2611150459", instrumentSymbol: "GEMI-WXHIGH-AUS-2611150459-LO66", payoutPerClaim: 250n * USDC, maxClaims: 1 };
+
+test("getPrice_dailyHigh_isSoldUntilItsDayBegins", async () => {
+  // The market closes in 30 hours, so its day begins in 6.
+  const { pricer, clock } = setup(austin(30 * 3600));
+  const p = await pricer.getPrice(cover);
+  assert.equal(p.claimDeadline, NOW + 6 * 3600);
+  assert.equal(p.marketCloseTime, NOW + 30 * 3600);
+  assert.equal(p.display.condition, "the high in Austin on November 14 is 66°F or below");
+  assert.equal(p.display.startTime, NOW + 6 * 3600);
+  // 37% of 250 is 92.50; with 5% it is 97.13 once rounded up.
+  assert.equal(p.breakdown.cost, "97130000");
+  await refusal(pricer.getPrice({ ...cover, claimDeadline: NOW + 6 * 3600 + 1 }), "deadline-too-late");
+
+  // Once the day has begun the high is being measured: nothing is sold on it.
+  clock.now = NOW + 6 * 3600;
+  await refusal(pricer.getPrice(cover), "event-started");
+  clock.now = NOW + 6 * 3600 - 29;
+  await refusal(pricer.getPrice(cover), "too-close");
+});
+
+test("signQuote_hedgeMode_overCapacity_saysHowMuchTheVaultCanCover", async () => {
+  // 100 in the vault: 18 may be at risk. 29.45 of payout at 0.37 plus 5% costs 11.45 and puts exactly 18 at risk.
+  const { pricer } = setup(austin(30 * 3600), { balance: 100n * USDC });
+  const err = await refusal(pricer.signQuote({ ...cover, hedgeMode: true, merchant: MERCHANT }), "over-capacity");
+  assert.equal(err.maxPayout, 29_450_000n);
+  assert.equal(err.message, "We can cover up to $29.45 on this right now.");
+  const fits = await pricer.signQuote({ ...cover, payoutPerClaim: 29_450_000n, hedgeMode: true, merchant: MERCHANT });
+  assert.deepEqual([fits.quote.hedgeMode, fits.quote.maxClaims, fits.quote.claimDeadline], [true, 1, NOW + 6 * 3600]);
+
+  // A vault with nothing free can cover nothing.
+  const none = await refusal(
+    setup(austin(30 * 3600), { balance: 0n }).pricer.signQuote({ ...cover, hedgeMode: true, merchant: MERCHANT }),
+    "over-capacity",
+  );
+  assert.equal(none.message, "We cannot cover this right now.");
+});
+
 test("signQuote_liveQuotes_countUntilTheyExpireOrAreUsed", async () => {
   const { pricer, clock, state } = setup(game());
   // 280 customers fit once. A second quote for 280 does not: the first may still become a promo.
