@@ -2,15 +2,18 @@
 pragma solidity 0.8.28;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 
-/// @dev Stand-in for Arc's USDC ERC-20 interface: 6 decimals, anyone can mint, and a blocklist
-///      that anyone can set. Like USDC, a transfer to or from a blocked address reverts.
-contract MockUSDC is ERC20 {
+/// @dev Stand-in for Arc's USDC ERC-20 interface: 6 decimals, anyone can mint, EIP-2612 permit,
+///      and a blocklist that anyone can set. Like USDC, a transfer to or from a blocked address
+///      reverts. The permit domain is not Arc's (that is name "USDC", version "2"), so tests read
+///      DOMAIN_SEPARATOR() from the token, as a client should.
+contract MockUSDC is ERC20, ERC20Permit {
     error Blocked(address account);
 
     mapping(address => bool) public blocked;
 
-    constructor() ERC20("USD Coin", "USDC") {}
+    constructor() ERC20("USD Coin", "USDC") ERC20Permit("USD Coin") {}
 
     function decimals() public pure override returns (uint8) {
         return 6;

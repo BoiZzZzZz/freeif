@@ -27,6 +27,9 @@ contract VaultHandler is Test {
         Retry
     }
 
+    bytes32 internal constant PERMIT_TYPEHASH =
+        keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+
     error BadTransition(uint256 promoId, PromoVault.Status from, PromoVault.Status to);
     error ForbiddenCallWentThrough(uint256 promoId, uint256 kind);
 
@@ -40,6 +43,7 @@ contract VaultHandler is Test {
     address[] internal lps;
     address[] internal merchants;
     address[] internal customers;
+    mapping(address => uint256) internal merchantPk;
 
     // Every USDC movement in or out of the vault, as the handler saw it.
     uint256 public ghostDeposited;
@@ -55,6 +59,11 @@ contract VaultHandler is Test {
 
     /// @dev Payouts that payoutBatch could not send because the customer was blocked.
     uint256 public payoutsFailed;
+
+    /// @dev Promos opened through createPromoWithPermit, and how many of those had their permit
+    ///      submitted to USDC by someone else first.
+    uint256 public permitCreates;
+    uint256 public permitsFrontRun;
 
     /// @dev How many forbidden calls were tried (and reverted, or the run would have failed).
     uint256 public forbiddenTried;
@@ -74,7 +83,9 @@ contract VaultHandler is Test {
             lps.push(makeAddr(string.concat("lp-", vm.toString(i))));
         }
         for (uint256 i = 0; i < 2; i++) {
-            merchants.push(makeAddr(string.concat("merchant-", vm.toString(i))));
+            (address merchant, uint256 pk) = makeAddrAndKey(string.concat("merchant-", vm.toString(i)));
+            merchants.push(merchant);
+            merchantPk[merchant] = pk;
         }
         for (uint256 i = 0; i < 8; i++) {
             customers.push(makeAddr(string.concat("customer-", vm.toString(i))));
@@ -143,6 +154,60 @@ contract VaultHandler is Test {
         uint256 closeAfter
     ) external {
         if (vault.paused() || vault.promoCount() >= MAX_PROMOS) return;
+        PromoVault.Quote memory q =
+            _newQuote(merchantSeed, payoutPerClaim, maxClaims, premium, hedgeMode, deadlineIn, closeAfter);
+
+        usdc.mint(q.merchant, q.premium);
+        vm.startPrank(q.merchant);
+        usdc.approve(address(vault), q.premium);
+        vault.createPromo(q, _signQuote(q));
+        vm.stopPrank();
+
+        _afterCreate(q);
+    }
+
+    /// @dev The same promo with no approval: the merchant signs a permit for the premium. For
+    ///      one quote in three a stranger submits that permit to USDC first, and the create must
+    ///      go through all the same.
+    function createPromoWithPermit(
+        uint256 merchantSeed,
+        uint256 payoutPerClaim,
+        uint32 maxClaims,
+        uint256 premium,
+        bool hedgeMode,
+        uint256 deadlineIn,
+        uint256 closeAfter
+    ) external {
+        if (vault.paused() || vault.promoCount() >= MAX_PROMOS) return;
+        PromoVault.Quote memory q =
+            _newQuote(merchantSeed, payoutPerClaim, maxClaims, premium, hedgeMode, deadlineIn, closeAfter);
+
+        usdc.mint(q.merchant, q.premium);
+        uint256 deadline = block.timestamp + 10 minutes;
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(q.merchant, q.premium, deadline);
+        if (uint256(q.nonce) % 3 == 0) {
+            usdc.permit(q.merchant, address(vault), q.premium, deadline, v, r, s);
+            permitsFrontRun++;
+        }
+        bytes memory sig = _signQuote(q);
+        vm.prank(q.merchant);
+        vault.createPromoWithPermit(q, sig, deadline, v, r, s);
+
+        assertEq(usdc.allowance(q.merchant, address(vault)), 0, "the permit left an allowance behind");
+        permitCreates++;
+        _afterCreate(q);
+    }
+
+    /// @dev A quote the vault will accept right now.
+    function _newQuote(
+        uint256 merchantSeed,
+        uint256 payoutPerClaim,
+        uint32 maxClaims,
+        uint256 premium,
+        bool hedgeMode,
+        uint256 deadlineIn,
+        uint256 closeAfter
+    ) internal returns (PromoVault.Quote memory) {
         payoutPerClaim = bound(payoutPerClaim, 1, 50 * USDC);
         maxClaims = hedgeMode ? 1 : uint32(bound(maxClaims, 1, 6));
         uint256 maxPayout = payoutPerClaim * maxClaims;
@@ -153,7 +218,7 @@ contract VaultHandler is Test {
         if (maxPayout - premium > cap) premium = maxPayout - cap;
 
         uint64 claimDeadline = uint64(block.timestamp + bound(deadlineIn, 10 minutes, 6 hours));
-        PromoVault.Quote memory q = PromoVault.Quote({
+        return PromoVault.Quote({
             merchant: merchants[merchantSeed % merchants.length],
             claimSigner: relayer,
             geminiEventId: keccak256(bytes(EVENT_ID_PLAIN)),
@@ -167,15 +232,29 @@ contract VaultHandler is Test {
             expiry: uint64(block.timestamp + 90),
             nonce: bytes32(++nonce)
         });
+    }
+
+    function _signQuote(PromoVault.Quote memory q) internal view returns (bytes memory) {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pricerPk, vault.quoteDigest(q));
+        return abi.encodePacked(r, s, v);
+    }
 
-        usdc.mint(q.merchant, premium);
-        vm.startPrank(q.merchant);
-        usdc.approve(address(vault), premium);
-        vault.createPromo(q, abi.encodePacked(r, s, v));
-        vm.stopPrank();
+    /// @dev An EIP-2612 permit from the merchant to the vault, at the merchant's current nonce.
+    function _signPermit(address merchant, uint256 value, uint256 deadline)
+        internal
+        view
+        returns (uint8, bytes32, bytes32)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(PERMIT_TYPEHASH, merchant, address(vault), value, usdc.nonces(merchant), deadline)
+        );
+        return vm.sign(
+            merchantPk[merchant], keccak256(abi.encodePacked("\x19\x01", usdc.DOMAIN_SEPARATOR(), structHash))
+        );
+    }
 
-        ghostPremiums += premium;
+    function _afterCreate(PromoVault.Quote memory q) internal {
+        ghostPremiums += q.premium;
         lastQuote = q;
         _afterAction();
     }
@@ -304,12 +383,14 @@ contract VaultHandler is Test {
     ///      5  voidPromo before the grace period ends, or on a promo with a result
     ///      6  a second promo from a quote nonce that has been used
     ///      7  retryPayout for a customer who is owed nothing, or who is still blocked
+    ///      8  the same spent nonce through createPromoWithPermit, with a good permit
+    ///      9  a new promo while the vault is paused, by either function, from a good quote
     function forbidden(uint256 promoSeed, uint256 kind, address caller) external {
         uint256 n = vault.promoCount();
         if (n == 0) return;
         uint256 promoId = promoSeed % n;
         PromoVault.Promo memory p = vault.getPromo(promoId);
-        kind = kind % 8;
+        kind = kind % 10;
         bytes memory data;
 
         if (kind == 0) {
@@ -338,23 +419,39 @@ contract VaultHandler is Test {
             address customer = customers[uint160(caller) % customers.length];
             if (vault.owedPayout(promoId, customer) != 0 && !usdc.blocked(customer)) return;
             data = abi.encodeCall(vault.retryPayout, (promoId, customer));
+        } else if (kind == 9) {
+            if (!vault.paused()) return;
+            uint256 seed = uint160(caller);
+            data = _createCall(_newQuote(seed, seed, uint32(seed), seed, false, seed, seed), seed % 2 == 0);
         } else {
             // The last quote again, re-dated and re-signed by the pricer, with its spent nonce.
             PromoVault.Quote memory q = lastQuote;
             q.claimDeadline = uint64(block.timestamp + 1 hours);
             q.marketCloseTime = q.claimDeadline;
             q.expiry = uint64(block.timestamp + 90);
-            (uint8 v, bytes32 r, bytes32 s) = vm.sign(pricerPk, vault.quoteDigest(q));
-            data = abi.encodeCall(vault.createPromo, (q, abi.encodePacked(r, s, v)));
-            usdc.mint(q.merchant, q.premium);
-            vm.prank(q.merchant);
-            usdc.approve(address(vault), q.premium);
-            vm.prank(q.merchant);
+            data = _createCall(q, kind == 8);
         }
 
         (bool ok,) = address(vault).call(data);
         if (ok) revert ForbiddenCallWentThrough(promoId, kind);
         forbiddenTried++;
+    }
+
+    /// @dev Calldata for a create with everything in place that the merchant has to bring: the
+    ///      premium, the pricer signature, and the approval or the permit. The next call is made
+    ///      as the merchant.
+    function _createCall(PromoVault.Quote memory q, bool withPermit) internal returns (bytes memory data) {
+        usdc.mint(q.merchant, q.premium);
+        if (withPermit) {
+            uint256 deadline = block.timestamp + 10 minutes;
+            (uint8 v, bytes32 r, bytes32 s) = _signPermit(q.merchant, q.premium, deadline);
+            data = abi.encodeCall(vault.createPromoWithPermit, (q, _signQuote(q), deadline, v, r, s));
+        } else {
+            data = abi.encodeCall(vault.createPromo, (q, _signQuote(q)));
+            vm.prank(q.merchant);
+            usdc.approve(address(vault), q.premium);
+        }
+        vm.prank(q.merchant);
     }
 
     // ------------------------------------------------------------ time and admin
@@ -542,7 +639,7 @@ contract PromoVaultInvariantTest is Test {
         handler.deposit(0, 5_000e6);
         handler.deposit(1, 2_500e6);
 
-        bytes4[] memory selectors = new bytes4[](18);
+        bytes4[] memory selectors = new bytes4[](19);
         selectors[0] = VaultHandler.deposit.selector;
         selectors[1] = VaultHandler.withdraw.selector;
         selectors[2] = VaultHandler.createPromo.selector;
@@ -561,6 +658,7 @@ contract PromoVaultInvariantTest is Test {
         selectors[15] = VaultHandler.forbidden.selector;
         selectors[16] = VaultHandler.setBlocked.selector;
         selectors[17] = VaultHandler.retryPayout.selector;
+        selectors[18] = VaultHandler.createPromoWithPermit.selector;
         targetContract(address(handler));
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }

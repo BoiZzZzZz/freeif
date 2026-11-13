@@ -24,6 +24,9 @@ abstract contract VaultTest is Test {
     );
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    /// @dev The EIP-2612 type, the same one Arc's USDC reports from PERMIT_TYPEHASH().
+    bytes32 internal constant PERMIT_TYPEHASH =
+        keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
 
     MockUSDC internal usdc;
     PromoVault internal vault;
@@ -33,7 +36,8 @@ abstract contract VaultTest is Test {
     address internal oracle = makeAddr("oracle");
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
-    address internal merchant = makeAddr("merchant");
+    address internal merchant;
+    uint256 internal merchantPk;
     address internal relayer = makeAddr("relayer");
 
     uint256 private _nonce;
@@ -68,6 +72,7 @@ abstract contract VaultTest is Test {
 
     function setUp() public virtual {
         (pricer, pricerPk) = makeAddrAndKey("pricer");
+        (merchant, merchantPk) = makeAddrAndKey("merchant");
         usdc = new MockUSDC();
         vault = new PromoVault(usdc, pricer, oracle);
     }
@@ -164,6 +169,33 @@ abstract contract VaultTest is Test {
         returns (uint256 promoId)
     {
         return _create(_quote(payoutPerClaim, maxClaims, premium));
+    }
+
+    // ------------------------------------------------------------ permits
+
+    /// @dev An EIP-2612 permit from the key's address to the vault, at the owner's current nonce.
+    ///      The domain separator is read from the token, as the web app will read it.
+    function _signPermit(uint256 ownerPk, uint256 value, uint256 deadline)
+        internal
+        view
+        returns (uint8 v, bytes32 r, bytes32 s)
+    {
+        address owner = vm.addr(ownerPk);
+        bytes32 structHash = keccak256(
+            abi.encode(PERMIT_TYPEHASH, owner, address(vault), value, usdc.nonces(owner), deadline)
+        );
+        return vm.sign(ownerPk, keccak256(abi.encodePacked("\x19\x01", usdc.DOMAIN_SEPARATOR(), structHash)));
+    }
+
+    /// @dev Give the merchant the premium but no approval, and create the promo with a permit
+    ///      the merchant signs for exactly the premium.
+    function _createWithPermit(PromoVault.Quote memory q) internal returns (uint256 promoId) {
+        usdc.mint(q.merchant, q.premium);
+        bytes memory sig = _sign(q);
+        uint256 deadline = block.timestamp + 10 minutes;
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, q.premium, deadline);
+        vm.prank(q.merchant);
+        promoId = vault.createPromoWithPermit(q, sig, deadline, v, r, s);
     }
 
     // ------------------------------------------------------------ lifecycle

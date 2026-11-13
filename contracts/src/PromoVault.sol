@@ -2,6 +2,7 @@
 pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
@@ -299,6 +300,32 @@ contract PromoVault is EIP712 {
         whenNotPaused
         returns (uint256 promoId)
     {
+        return _createPromo(q, sig);
+    }
+
+    /// @notice createPromo without the separate approval: the caller signs an EIP-2612 permit for
+    ///         the premium, and the vault uses it in the same transaction.
+    /// @dev The permit is for exactly (owner msg.sender, spender this vault, value q.premium,
+    ///      deadline permitDeadline). A permit that fails does not revert here. Anyone can submit
+    ///      a signed permit to USDC first, which spends its nonce, and the allowance is then
+    ///      already in place; and if there is no allowance at all, the premium transfer reverts
+    ///      as it does in createPromo. Everything after the permit is createPromo.
+    /// @return promoId Index of the new promo.
+    function createPromoWithPermit(
+        Quote calldata q,
+        bytes calldata sig,
+        uint256 permitDeadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused returns (uint256 promoId) {
+        try IERC20Permit(address(usdc))
+            .permit(msg.sender, address(this), q.premium, permitDeadline, v, r, s) {}
+            catch {}
+        return _createPromo(q, sig);
+    }
+
+    function _createPromo(Quote calldata q, bytes calldata sig) internal returns (uint256 promoId) {
         if (q.merchant != msg.sender) revert NotQuoteMerchant();
         if (q.expiry <= block.timestamp) revert QuoteExpired(q.expiry);
         if (usedQuoteNonce[q.nonce]) revert QuoteNonceUsed(q.nonce);

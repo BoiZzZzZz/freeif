@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {PromoVault} from "../src/PromoVault.sol";
 import {VaultTest} from "./VaultTest.sol";
 
@@ -466,5 +467,349 @@ contract CreatePromoTest is VaultTest {
 
     function _copy(PromoVault.Quote memory q) internal pure returns (PromoVault.Quote memory) {
         return abi.decode(abi.encode(q), (PromoVault.Quote));
+    }
+}
+
+/// @dev createPromoWithPermit: the merchant holds the premium and has approved nothing. The quote
+///      rules are the ones CreatePromoTest covers, through the same internal function; the tests
+///      here are about the permit, plus one check that the two paths build the same promo.
+contract CreatePromoWithPermitTest is VaultTest {
+    uint256 internal constant PAYOUT = 20 * USDC;
+    uint32 internal constant MAX_CLAIMS = 200;
+    uint256 internal constant PREMIUM = 1_638 * USDC;
+    uint256 internal constant MAX_PAYOUT = 4_000 * USDC;
+    uint256 internal constant LIQUIDITY = 11_810 * USDC;
+
+    PromoVault.Quote internal q;
+    bytes internal sig;
+    uint256 internal permitDeadline;
+
+    /// A signed quote, and a merchant with the premium and no approval.
+    function setUp() public override {
+        super.setUp();
+        _deposit(alice, LIQUIDITY);
+        q = _quote(PAYOUT, MAX_CLAIMS, PREMIUM);
+        sig = _sign(q);
+        usdc.mint(merchant, PREMIUM);
+        permitDeadline = block.timestamp + 10 minutes;
+    }
+
+    function _insufficientAllowance(uint256 allowance) internal view returns (bytes memory) {
+        return abi.encodeWithSelector(
+            IERC20Errors.ERC20InsufficientAllowance.selector, address(vault), allowance, PREMIUM
+        );
+    }
+
+    // ------------------------------------------------------------ the happy path
+
+    function test_createPromoWithPermit_needsNoApproval() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+        assertEq(usdc.allowance(merchant, address(vault)), 0);
+
+        vm.expectEmit(address(vault));
+        emit PromoCreated(0, merchant, SYMBOL, q);
+        vm.prank(merchant);
+        uint256 promoId = vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+
+        assertEq(promoId, 0);
+        assertEq(vault.promoCount(), 1);
+        assertEq(usdc.balanceOf(merchant), 0);
+        assertEq(usdc.balanceOf(address(vault)), LIQUIDITY + PREMIUM);
+        assertEq(vault.lockedCollateral(), MAX_PAYOUT);
+        assertEq(vault.freeBalance(), LIQUIDITY + PREMIUM - MAX_PAYOUT);
+        assertTrue(vault.usedQuoteNonce(q.nonce));
+    }
+
+    /// The permit is for exactly the premium, so nothing is left approved afterwards.
+    function test_createPromoWithPermit_usesUpThePermit() public {
+        _createFromSetUp();
+
+        assertEq(usdc.allowance(merchant, address(vault)), 0);
+        assertEq(usdc.nonces(merchant), 1);
+    }
+
+    /// Same quote, both ways in: the stored promo and the vault's books are identical.
+    function testFuzz_createPromoWithPermit_buildsTheSamePromoAsCreatePromo(
+        uint256 payoutPerClaim,
+        uint32 maxClaims,
+        uint256 premium,
+        bool hedgeMode
+    ) public {
+        payoutPerClaim = bound(payoutPerClaim, 1, 100 * USDC);
+        maxClaims = hedgeMode ? 1 : uint32(bound(maxClaims, 1, 500));
+        uint256 maxPayout = payoutPerClaim * maxClaims;
+        // Keep the vault's risk under the 20% cap, so the quote is one createPromo accepts.
+        uint256 cap = LIQUIDITY / 5;
+        premium = bound(premium, maxPayout > cap ? maxPayout - cap : 0, maxPayout);
+        PromoVault.Quote memory fq = _quote(payoutPerClaim, maxClaims, premium);
+        fq.hedgeMode = hedgeMode;
+
+        uint256 snapshot = vm.snapshotState();
+        uint256 promoId = _create(fq);
+        bytes32 promo = keccak256(abi.encode(vault.getPromo(promoId)));
+        bytes32 books = _books(promoId);
+        vm.revertToState(snapshot);
+
+        assertEq(_createWithPermit(fq), promoId);
+        assertEq(keccak256(abi.encode(vault.getPromo(promoId))), promo, "the stored promo differs");
+        assertEq(_books(promoId), books, "the books differ");
+        assertEq(usdc.allowance(merchant, address(vault)), 0);
+    }
+
+    function test_createPromoWithPermit_hedgeMode_registersTheMerchant() public {
+        PromoVault.Quote memory hq = _quote(500 * USDC, 1, 205 * USDC);
+        hq.hedgeMode = true;
+
+        uint256 promoId = _createWithPermit(hq);
+
+        assertTrue(vault.getPromo(promoId).hedgeMode);
+        assertEq(vault.getPromo(promoId).claimCount, 1);
+        assertTrue(vault.hasClaim(promoId, merchant));
+        assertEq(vault.lockedCollateral(), 500 * USDC);
+    }
+
+    // ------------------------------------------------------------ a permit that does not go through
+
+    /// Anyone can take the signed permit from the pending transaction and submit it to USDC
+    /// first. That spends the permit's nonce, so the vault's own permit call fails; the
+    /// allowance is there all the same and the promo is created.
+    function test_createPromoWithPermit_stillWorksWhenThePermitWasSubmittedFirst() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+        vm.prank(bob);
+        usdc.permit(merchant, address(vault), PREMIUM, permitDeadline, v, r, s);
+
+        vm.prank(merchant);
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+
+        assertEq(vault.promoCount(), 1);
+        assertEq(usdc.balanceOf(merchant), 0);
+        assertEq(usdc.allowance(merchant, address(vault)), 0);
+    }
+
+    /// The approval path still works through this function: a useless permit, an allowance.
+    function test_createPromoWithPermit_fallsBackToAnExistingApproval() public {
+        vm.prank(merchant);
+        usdc.approve(address(vault), PREMIUM);
+
+        vm.prank(merchant);
+        vault.createPromoWithPermit(q, sig, permitDeadline, 0, bytes32(0), bytes32(0));
+
+        assertEq(vault.promoCount(), 1);
+        assertEq(usdc.balanceOf(address(vault)), LIQUIDITY + PREMIUM);
+    }
+
+    function test_createPromoWithPermit_revertsWhenThePermitIsSignedByAnotherKey() public {
+        (, uint256 otherPk) = makeAddrAndKey("not the merchant");
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(otherPk, _permitDigest(merchant, PREMIUM, permitDeadline));
+
+        vm.prank(merchant);
+        vm.expectRevert(_insufficientAllowance(0));
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+    }
+
+    /// The vault asks USDC for the premium, so a permit signed for any other amount is invalid.
+    function test_createPromoWithPermit_revertsWhenThePermitIsForAnotherAmount() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM - 1, permitDeadline);
+        vm.prank(merchant);
+        vm.expectRevert(_insufficientAllowance(0));
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+
+        (v, r, s) = _signPermit(merchantPk, type(uint256).max, permitDeadline);
+        vm.prank(merchant);
+        vm.expectRevert(_insufficientAllowance(0));
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+    }
+
+    /// A permit that runs out before the quote does (the quote lasts 90 seconds).
+    function test_createPromoWithPermit_revertsWhenThePermitHasExpired() public {
+        uint256 shortDeadline = block.timestamp + 30;
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, shortDeadline);
+
+        vm.warp(shortDeadline + 1);
+        vm.prank(merchant);
+        vm.expectRevert(_insufficientAllowance(0));
+        vault.createPromoWithPermit(q, sig, shortDeadline, v, r, s);
+
+        // At the deadline itself the permit is still good.
+        vm.warp(shortDeadline);
+        vm.prank(merchant);
+        vault.createPromoWithPermit(q, sig, shortDeadline, v, r, s);
+    }
+
+    /// The deadline is part of what was signed: passing a later one does not revive the permit.
+    function test_createPromoWithPermit_revertsWhenTheDeadlineIsNotTheSignedOne() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+
+        vm.prank(merchant);
+        vm.expectRevert(_insufficientAllowance(0));
+        vault.createPromoWithPermit(q, sig, permitDeadline + 1, v, r, s);
+    }
+
+    /// A permit works once: the second promo needs a new signature.
+    function test_createPromoWithPermit_revertsWhenAPermitIsUsedTwice() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+        vm.prank(merchant);
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+
+        // The same premium, so the old permit names the right amount, on a promo small enough
+        // to fit under the cap now that the first one is open.
+        PromoVault.Quote memory second = _quote(PAYOUT, 100, PREMIUM);
+        usdc.mint(merchant, PREMIUM);
+        bytes memory secondSig = _sign(second);
+        vm.prank(merchant);
+        vm.expectRevert(_insufficientAllowance(0));
+        vault.createPromoWithPermit(second, secondSig, permitDeadline, v, r, s);
+    }
+
+    /// A merchant without the money: the permit goes through and the transfer does not.
+    function test_createPromoWithPermit_revertsWhenTheMerchantCannotPay() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+        vm.prank(merchant);
+        usdc.transfer(bob, 1);
+
+        vm.prank(merchant);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IERC20Errors.ERC20InsufficientBalance.selector, merchant, PREMIUM - 1, PREMIUM
+            )
+        );
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+    }
+
+    // ------------------------------------------------------------ the createPromo rules still hold
+
+    function test_createPromoWithPermit_revertsWhilePaused() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+
+        vault.pause();
+        vm.prank(merchant);
+        vm.expectRevert(PromoVault.VaultPaused.selector);
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+
+        vault.unpause();
+        vm.prank(merchant);
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+    }
+
+    /// Someone else cannot use the merchant's quote with a permit of their own.
+    function test_createPromoWithPermit_revertsWhenCallerIsNotTheQuoteMerchant() public {
+        (address mallory, uint256 malloryPk) = makeAddrAndKey("mallory");
+        usdc.mint(mallory, PREMIUM);
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(malloryPk, PREMIUM, permitDeadline);
+
+        vm.prank(mallory);
+        vm.expectRevert(PromoVault.NotQuoteMerchant.selector);
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+    }
+
+    /// Nor can someone else spend the merchant's permit on the merchant's behalf.
+    function test_createPromoWithPermit_revertsWhenAnotherCallerBringsTheMerchantsPermit() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+
+        vm.prank(bob);
+        vm.expectRevert(PromoVault.NotQuoteMerchant.selector);
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+        assertEq(usdc.allowance(merchant, address(vault)), 0);
+    }
+
+    function test_createPromoWithPermit_revertsWhenTheQuoteIsSignedByAnotherKey() public {
+        (, uint256 otherPk) = makeAddrAndKey("not the pricer");
+        bytes memory badSig = _signWith(otherPk, q);
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+
+        vm.prank(merchant);
+        vm.expectRevert(PromoVault.InvalidQuoteSignature.selector);
+        vault.createPromoWithPermit(q, badSig, permitDeadline, v, r, s);
+    }
+
+    function test_createPromoWithPermit_revertsOverTheExposureCap() public {
+        PromoVault.Quote memory over = _quote(PAYOUT, MAX_CLAIMS, PREMIUM - 1);
+        bytes memory overSig = _sign(over);
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM - 1, permitDeadline);
+
+        vm.prank(merchant);
+        vm.expectRevert(
+            abi.encodeWithSelector(PromoVault.ExposureTooHigh.selector, 2_362 * USDC + 1, 2_362 * USDC)
+        );
+        vault.createPromoWithPermit(over, overSig, permitDeadline, v, r, s);
+    }
+
+    /// One nonce, both functions: a quote used through one cannot be used again through the other.
+    function test_createPromoWithPermit_sharesTheQuoteNonceWithCreatePromo() public {
+        _createFromSetUp();
+        _fund(q);
+        vm.prank(merchant);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.QuoteNonceUsed.selector, q.nonce));
+        vault.createPromo(q, sig);
+
+        PromoVault.Quote memory other = _quote(PAYOUT, 10, 80 * USDC);
+        _create(other);
+        bytes memory otherSig = _sign(other);
+        usdc.mint(merchant, 80 * USDC);
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, 80 * USDC, permitDeadline);
+        vm.prank(merchant);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.QuoteNonceUsed.selector, other.nonce));
+        vault.createPromoWithPermit(other, otherSig, permitDeadline, v, r, s);
+    }
+
+    /// A create that reverts takes the permit back with it: no allowance is left behind, and the
+    /// same signature still works for the next attempt.
+    function test_createPromoWithPermit_aRevertedCreateDoesNotSpendThePermit() public {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+
+        vault.setPricer(bob);
+        vm.prank(merchant);
+        vm.expectRevert(PromoVault.InvalidQuoteSignature.selector);
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+        assertEq(usdc.allowance(merchant, address(vault)), 0);
+        assertEq(usdc.nonces(merchant), 0);
+
+        vault.setPricer(pricer);
+        vm.prank(merchant);
+        vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+        assertEq(vault.promoCount(), 1);
+    }
+
+    /// createPromo is unchanged and still needs the approval.
+    function test_createPromo_stillWorksWithAnApproval() public {
+        vm.prank(merchant);
+        vm.expectRevert(_insufficientAllowance(0));
+        vault.createPromo(q, sig);
+
+        vm.prank(merchant);
+        usdc.approve(address(vault), PREMIUM);
+        vm.prank(merchant);
+        vault.createPromo(q, sig);
+        assertEq(vault.promoCount(), 1);
+    }
+
+    // ------------------------------------------------------------ helpers
+
+    /// @dev The quote from setUp, with a permit signed for it.
+    function _createFromSetUp() internal returns (uint256 promoId) {
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, PREMIUM, permitDeadline);
+        vm.prank(merchant);
+        promoId = vault.createPromoWithPermit(q, sig, permitDeadline, v, r, s);
+    }
+
+    function _permitDigest(address owner, uint256 value, uint256 deadline) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(PERMIT_TYPEHASH, owner, address(vault), value, usdc.nonces(owner), deadline)
+        );
+        return keccak256(abi.encodePacked("\x19\x01", usdc.DOMAIN_SEPARATOR(), structHash));
+    }
+
+    /// @dev Everything outside the promo struct that creating a promo changes.
+    function _books(uint256 promoId) internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                vault.promoCount(),
+                vault.lockedCollateral(),
+                vault.freeBalance(),
+                usdc.balanceOf(address(vault)),
+                usdc.balanceOf(merchant),
+                vault.getClaimants(promoId)
+            )
+        );
     }
 }
