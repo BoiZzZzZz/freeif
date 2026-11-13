@@ -124,6 +124,7 @@ contract PromoVault is EIP712 {
     event Vetoed(uint256 indexed promoId);
     event SettlementReset(uint256 indexed promoId);
     event Finalized(uint256 indexed promoId, bool outcomeYes, uint256 collateralReleased);
+    event Voided(uint256 indexed promoId, address indexed merchant, uint256 premiumRefunded);
     event PricerSet(address indexed pricer);
     event OracleSet(address indexed oracle);
     event MaxExposureBpsSet(uint16 bps);
@@ -160,6 +161,7 @@ contract PromoVault is EIP712 {
     error EventIdMismatch();
     error DisputeWindowOver(uint256 windowEnd);
     error DisputeWindowOpen(uint256 windowEnd);
+    error VoidGraceNotOver(uint256 voidableAfter);
 
     // ---------------------------------------------------------------- setup
 
@@ -433,6 +435,27 @@ contract PromoVault is EIP712 {
         lockedCollateral -= released;
 
         emit Finalized(promoId, outcomeYes, released);
+    }
+
+    /// @notice Cancel a promo whose market Gemini voided or never settled: the merchant gets the
+    ///         premium back and the whole lock is released.
+    /// @dev Only for a promo with no standing result (Open or Vetoed), and only once voidGrace has
+    ///      passed since the market close. The refund is always covered: the premium is at most
+    ///      the lock this call releases.
+    function voidPromo(uint256 promoId) external onlyOwner {
+        Promo storage p = _promo(promoId);
+        if (p.status != Status.Open && p.status != Status.Vetoed) revert WrongStatus(p.status);
+        uint256 voidableAfter = uint256(p.marketCloseTime) + voidGrace;
+        if (block.timestamp <= voidableAfter) revert VoidGraceNotOver(voidableAfter);
+
+        address promoMerchant = p.merchant;
+        uint256 refund = p.premiumPaid;
+        lockedCollateral -= p.collateralLocked;
+        p.collateralLocked = 0;
+        p.status = Status.Voided;
+
+        emit Voided(promoId, promoMerchant, refund);
+        usdc.safeTransfer(promoMerchant, refund);
     }
 
     /// @dev The first moment a settled promo can be finalized, and the first moment a veto is

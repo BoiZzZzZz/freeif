@@ -61,6 +61,8 @@ abstract contract VaultTest is Test {
 
     event Finalized(uint256 indexed promoId, bool outcomeYes, uint256 collateralReleased);
 
+    event Voided(uint256 indexed promoId, address indexed merchant, uint256 premiumRefunded);
+
     function setUp() public virtual {
         (pricer, pricerPk) = makeAddrAndKey("pricer");
         usdc = new MockUSDC();
