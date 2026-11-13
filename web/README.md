@@ -6,7 +6,7 @@ The FreeIf app: Next.js 16 (App Router), React 19, Tailwind 4, viem, `qrcode.rea
 |---|---|
 | `/merchant` | A shop owner sets up a promo: a game and a team, what is free, how many customers, the live cost, Pay. The switch "My business gets paid" turns the same form into a cover: a day and a temperature range, an amount, the live cost, Pay (below) |
 | `/claim/[promoId]` | A customer at the counter scans the code, types an email and a 6-digit code, and is covered |
-| `/promo/[id]` | The merchant's dashboard and the public status page: one status sentence, three numbers, the counter code (replaced by a three-step timeline with real times once there is a result), a live feed, a chart of how the chance has moved since the promo started, proof |
+| `/promo/[id]` | The merchant's dashboard and the public status page: one status sentence, three numbers, the counter code (for the merchant, while the promo takes customers), a three-step timeline with real times (once there is a result), a live feed, a chart of how the chance has moved since the promo started, proof |
 | `/promo/[id]/print` | The counter sign with the code, printed from the browser |
 | `/lp` | A liquidity provider: what the vault holds, how much of it is locked, what it has earned, both share prices, deposit and withdraw, every promo with what it locks and what it made, each open promo's chance now and its hedge order, the risks, and the vault's activity |
 
@@ -48,9 +48,9 @@ A promo pays a shop's customers. The same contract can pay the shop: one payout,
 
 - **What can be covered.** Gemini's daily high-temperature markets (`GET /weather` on the keeper): a city, a day, and a button per two-degree range with its chance. A food truck in Austin that loses a cold Saturday picks "66°F or below". A range with no two-sided price on Gemini cannot be picked.
 - **Until when.** A day can be bought until it begins. From then on its high is being measured.
-- **How much.** One field: what the business gets if it happens. The price card shows the chance, "You'd receive" and the cost. When the vault cannot cover the amount, the form says how much it can ("We can cover up to $11.86 on this right now."), and an amount nobody has typed yet comes down to that by itself.
+- **How much.** One field: what the business gets if it happens. The price card shows the chance, "You'd receive" and the cost. When the vault cannot cover the amount, the form says how much it can ("We can cover up to $11.86 on this right now."), and an amount nobody has typed yet comes down by itself to the whole dollars under that.
 - **Pay** is the same two screens and the same one transaction as a promo. The quote says `hedgeMode`, the vault registers the buyer as the one to be paid, and there is no code to scan: `/claim/[id]` for a cover says so.
-- **Its page** (`/promo/[id]`) says "$2.00 to Test Tacos if the high in Austin on November 14 is 66°F or below", what was paid, the chart, and after the result a timeline that ends "You were paid $2.00". Gemini settles a day's high the next morning (about 11:00 UTC on the days checked), and the keeper posts the result and pays within a minute of it.
+- **Its page** (`/promo/[id]`) says "$2.00 to Test Tacos if the high in Austin on November 14 is 66°F or below", what was paid, the chart, and after the result a timeline that ends "You were paid $2.00". Gemini settles a day's high the next morning (about 11:00 UTC on the days checked), and the keeper posts the result on its next pass (every 30 seconds) and pays once the dispute window is over: 30 seconds on the deployed vault, an hour by default. No cover has reached a result yet; promo 21 is the first.
 - On `/lp` a cover is listed as "Business cover", with its lock and its hedge order like any promo.
 
 ## The vault page
@@ -109,5 +109,5 @@ On Vercel the two Circle values are project variables. On a developer machine th
 - The `/api/wallet` routes are limited per address (`src/lib/server/limit.ts`): 240 calls a minute over all of them, and 20 login codes in ten minutes, each code being an email to whatever address was typed. The counts are in the server's memory and Vercel can run more than one copy of the server, so this stops a loop, not a determined sender. Circle has its own limit on the codes sent to one email address.
 - The claim page sends the customer's login token to the keeper with the claim, and the keeper asks Circle whose it is: one claim per login per promo, for that login's own account. The token is a credential for an hour; it goes to the keeper over HTTPS and is not stored there.
 - Buttons, inputs, the bottom sheet and the chart are written by hand, not taken from a component library. The sheet does not trap focus on purpose: Circle's window is an iframe on the page and has to sit above it.
-- A login lasts one hour (Circle's user token). After that the app asks for the email again.
+- The app keeps a login for 55 minutes (Circle's user token lasts 60). After that it asks for the email again.
 - Cash out sends to an address only. Its confirmation screen in Circle's window, and a real send, have not been run with a real login yet.
