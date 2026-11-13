@@ -110,6 +110,21 @@ contract DepositTest is VaultTest {
         vm.stopPrank();
     }
 
+    /// Only reachable with the exposure cap at 100%: one promo locks every free unit.
+    function test_deposit_revertsWhenNothingIsFree() public {
+        _deposit(alice, 1_000 * USDC);
+        vault.setMaxExposureBps(10_000);
+        _openPromo(0, 1_000 * USDC);
+        assertEq(vault.freeBalance(), 0);
+
+        usdc.mint(bob, 10 * USDC);
+        vm.startPrank(bob);
+        usdc.approve(address(vault), 10 * USDC);
+        vm.expectRevert(PromoVault.NoFreeBalance.selector);
+        vault.deposit(10 * USDC);
+        vm.stopPrank();
+    }
+
     /// The classic vault attack: be first, deposit dust, donate to inflate the share price,
     /// and let the next depositor's shares round down. The dead shares make the donor pay for it.
     function test_firstDepositorCannotProfitByInflatingTheSharePrice() public {

@@ -142,6 +142,7 @@ contract PromoVault is EIP712 {
     error ZeroAmount();
     error FirstDepositTooSmall(uint256 amount, uint256 minimum);
     error ZeroShares();
+    error NoFreeBalance();
     error InsufficientShares(uint256 held, uint256 requested);
     error UnknownPromo(uint256 promoId);
     error NotQuoteMerchant();
@@ -243,7 +244,10 @@ contract PromoVault is EIP712 {
             totalShares = DEAD_SHARES;
         } else {
             // Priced before the transfer arrives. Rounds down, in favor of existing LPs.
-            sharesMinted = amount * totalShares / freeBalance();
+            // With nothing free (every unit is locked behind promos) a share has no price.
+            uint256 free = freeBalance();
+            if (free == 0) revert NoFreeBalance();
+            sharesMinted = amount * totalShares / free;
             if (sharesMinted == 0) revert ZeroShares();
         }
 
