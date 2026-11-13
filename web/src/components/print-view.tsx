@@ -4,9 +4,9 @@
 // register. Not a window poster: a QR in the window would let people claim without buying.
 import { QRCodeSVG } from "qrcode.react";
 import { useSyncExternalStore } from "react";
-import { usePromo } from "@/components/promo-view";
 import { Button } from "@/components/ui/button";
 import { timeOf, usd } from "@/lib/format";
+import { usePromo } from "@/lib/use-promo";
 
 const noop = () => () => {};
 

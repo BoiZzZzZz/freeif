@@ -4,7 +4,7 @@
 // a code, and sees Covered. The card is above the email field, so they see the offer before being
 // asked for anything. The relayer registers them; the customer sees nothing about it.
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { EmailStep } from "@/components/email-step";
 import { SiteFooter } from "@/components/mechanics";
 import { ReceiptCard, type CardState } from "@/components/receipt-card";
@@ -16,6 +16,7 @@ import { keeper, KeeperError, type Promo } from "@/lib/keeper";
 import { KEYS, NO_CLAIMS, readLocal, saveLocal, useLocal } from "@/lib/local";
 import { coveredState, takingCustomers } from "@/lib/promo";
 import { useNow } from "@/lib/use-now";
+import { usePromo } from "@/lib/use-promo";
 import { useWallet, type Session } from "@/lib/wallet";
 
 // The keeper's answers when the login is no good: Circle does not know the token (it lasts an hour),
@@ -36,8 +37,6 @@ function refusal(err: unknown, promo: Promo | null): string {
 export function ClaimView({ promoId }: { promoId: string }) {
   const wallet = useWallet();
   const claims = useLocal<Record<string, string>>(KEYS.claims, NO_CLAIMS);
-  const [promo, setPromo] = useState<Promo | null>(null);
-  const [missing, setMissing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [details, setDetails] = useState(false);
@@ -46,24 +45,9 @@ export function ClaimView({ promoId }: { promoId: string }) {
   // The address to look for on the promo: the one this browser was covered with, or the login's.
   const address = claims[promoId] ?? wallet.session?.address ?? null;
 
-  const load = useCallback(
-    (signal?: AbortSignal) =>
-      keeper.promo(promoId, address, signal).then(setPromo, (err) => {
-        if (err instanceof KeeperError && (err.status === 404 || err.status === 400)) setMissing(true);
-      }),
-    [promoId, address],
-  );
-
-  // The page stays open through the game: the result and the payout show up here by themselves.
-  useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
-    const timer = window.setInterval(() => void load(controller.signal), 8000);
-    return () => {
-      controller.abort();
-      window.clearInterval(timer);
-    };
-  }, [load]);
+  // The page stays open through the game: the result and the payout arrive here by themselves, the
+  // moment the keeper has them.
+  const { promo, missing, show } = usePromo(promoId, address);
 
   useEffect(() => wallet.warm(), [wallet]);
 
@@ -74,7 +58,7 @@ export function ClaimView({ promoId }: { promoId: string }) {
       // The login token goes with the claim: the keeper asks Circle whose it is before it covers anyone.
       await keeper.claim({ promoId, customer: session.address, userToken: session.userToken });
       saveLocal(KEYS.claims, { ...readLocal<Record<string, string>>(KEYS.claims, NO_CLAIMS), [promoId]: session.address });
-      setPromo(await keeper.promo(promoId, session.address));
+      show(await keeper.promo(promoId, session.address));
     } catch (err) {
       // A login the keeper refuses is forgotten, so the email field is there again.
       if (err instanceof KeeperError && LOGIN_AGAIN.has(err.code)) wallet.logout();
@@ -109,7 +93,9 @@ export function ClaimView({ promoId }: { promoId: string }) {
         ? "open"
         : taking;
   const each = usd(promo.payoutPerClaim);
-  const paidAt = promo.txs.findLast((t) => t.action === "payoutBatch" || t.action === "retryPayout")?.at ?? null;
+  // When this customer's payout was sent: the time of their own Paid event.
+  const mine = promo.customer?.address.toLowerCase();
+  const paidAt = promo.events.findLast((e) => e.event === "Paid" && e.customer?.toLowerCase() === mine)?.at ?? null;
   const item = promo.item?.toLowerCase();
 
   return (

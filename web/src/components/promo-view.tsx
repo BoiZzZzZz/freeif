@@ -4,15 +4,16 @@
 // page, and the proof page. One page; the counter kit shows only to the promo's merchant.
 import Link from "next/link";
 import { QRCodeCanvas, QRCodeSVG } from "qrcode.react";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useRef, useState, useSyncExternalStore } from "react";
 import { SiteFooter, useMechanics } from "@/components/mechanics";
 import { Button } from "@/components/ui/button";
 import { explorerAddress, explorerTx, KEEPER_URL } from "@/lib/config";
 import { dayTime, timeOf, usd } from "@/lib/format";
-import { keeper, KeeperError, type Promo } from "@/lib/keeper";
+import type { Promo } from "@/lib/keeper";
 import { KEYS, NO_PROMOS, useLocal, type MyPromo } from "@/lib/local";
 import { feedLines, promoTitle, statusLine, takingCustomers } from "@/lib/promo";
 import { useNow } from "@/lib/use-now";
+import { usePromo } from "@/lib/use-promo";
 import { useWallet } from "@/lib/wallet";
 
 const noop = () => () => {};
@@ -24,30 +25,8 @@ const useOrigin = () =>
     () => "",
   );
 
-const FINISHED = new Set(["PaidOut", "FinalizedNo", "Voided"]);
-
-export function usePromo(id: string): { promo: Promo | null; missing: boolean } {
-  const [promo, setPromo] = useState<Promo | null>(null);
-  const [missing, setMissing] = useState(false);
-  const finished = promo !== null && FINISHED.has(promo.status);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const load = () =>
-      keeper.promo(id, null, controller.signal).then(setPromo, (err) => {
-        if (err instanceof KeeperError && (err.status === 404 || err.status === 400)) setMissing(true);
-      });
-    void load();
-    // A promo that is over no longer changes; one that is live is read every few seconds.
-    const timer = window.setInterval(load, finished ? 60_000 : 4000);
-    return () => {
-      controller.abort();
-      window.clearInterval(timer);
-    };
-  }, [id, finished]);
-
-  return { promo, missing };
-}
+/** "0.8 s": how long after its block the keeper had an event. */
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)} s`;
 
 export function PromoView({ id }: { id: string }) {
   const wallet = useWallet();
@@ -75,7 +54,10 @@ export function PromoView({ id }: { id: string }) {
   const merchant = created !== undefined || wallet.session?.address.toLowerCase() === promo.merchant.toLowerCase();
   const status = statusLine(promo, now, merchant);
   const taking = takingCustomers(promo, now) === "yes";
-  const feed = feedLines(promo);
+  const feed = feedLines(promo, merchant);
+  // How the newest event reached the keeper: the QuickNode Stream's delivery, or its own read of the chain.
+  const transport = feed[0]?.via === "stream" ? "QuickNode Stream" : "RPC";
+  const started = promo.events.some((e) => e.event === "PromoCreated");
   const condition = promo.condition ?? "it happens";
   const tone = status.tone === "go" ? "text-go" : status.tone === "grey" ? "text-ink/60" : "text-ink";
 
@@ -94,7 +76,7 @@ export function PromoView({ id }: { id: string }) {
         </span>
         <span className="num flex items-center gap-1.5 text-[12px] text-ink/60">
           <span className="size-2 rounded-full bg-go" />
-          {mechanics ? "Live · keeper API over RPC" : "Live"}
+          {mechanics ? `Live · ${transport}` : "Live"}
         </span>
       </div>
       <h1 className="mt-2 text-[26px] font-semibold leading-tight tracking-tight">{promoTitle(promo.item, promo.condition)}</h1>
@@ -125,9 +107,17 @@ export function PromoView({ id }: { id: string }) {
         <h2 className="label mb-2">What&apos;s happening</h2>
         <ul className="divide-y divide-line rounded-[10px] border border-line bg-card">
           {feed.map((line) => (
-            <li key={line.hash} className="fade-in flex items-baseline gap-4 px-4 py-2.5 text-[15px]">
+            <li key={line.id} className="fade-in flex items-baseline gap-4 px-4 py-2.5 text-[15px]">
               <span className="num w-[72px] shrink-0 text-[13px] text-ink/60">{timeOf(line.at)}</span>
-              <span className="min-w-0 flex-1">{line.text}</span>
+              <span className="min-w-0 flex-1">
+                {line.text}
+                {mechanics && (
+                  <span className="num block text-[12px] text-ink/60">
+                    {line.via === "stream" ? "QuickNode Stream" : "RPC"}
+                    {line.lagMs !== null && ` · ${seconds(line.lagMs)} after the block`}
+                  </span>
+                )}
+              </span>
               {mechanics && (
                 <a className="num shrink-0 text-[12px] underline underline-offset-2" href={explorerTx(line.hash)} target="_blank" rel="noreferrer">
                   Arc tx
@@ -135,17 +125,20 @@ export function PromoView({ id }: { id: string }) {
               )}
             </li>
           ))}
-          <li className="flex items-baseline gap-4 px-4 py-2.5 text-[15px]">
-            <span className="num w-[72px] shrink-0 text-[13px] text-ink/60">{created ? timeOf(created.at) : ""}</span>
-            <span className="min-w-0 flex-1">
-              Promo started. {merchant ? "You" : "The shop"} paid {usd(promo.premiumPaid)}.
-            </span>
-            {mechanics && created?.tx && (
-              <a className="num shrink-0 text-[12px] underline underline-offset-2" href={explorerTx(created.tx)} target="_blank" rel="noreferrer">
-                Arc tx
-              </a>
-            )}
-          </li>
+          {/* Until the promo's first event has reached the keeper, a second or two after Pay. */}
+          {!started && (
+            <li className="flex items-baseline gap-4 px-4 py-2.5 text-[15px]">
+              <span className="num w-[72px] shrink-0 text-[13px] text-ink/60">{created ? timeOf(created.at) : ""}</span>
+              <span className="min-w-0 flex-1">
+                Promo started. {merchant ? "You" : "The shop"} paid {usd(promo.premiumPaid)}.
+              </span>
+              {mechanics && created?.tx && (
+                <a className="num shrink-0 text-[12px] underline underline-offset-2" href={explorerTx(created.tx)} target="_blank" rel="noreferrer">
+                  Arc tx
+                </a>
+              )}
+            </li>
+          )}
         </ul>
       </section>
 
@@ -230,7 +223,16 @@ function CounterKit({ id, promo }: { id: string; promo: Promo }) {
 
 /** Proof (section 11): closed for a merchant, open in the mechanics view. Readable in under a minute. */
 function Proof({ promo, open }: { promo: Promo; open: boolean }) {
-  const settle = promo.txs.find((t) => t.action === "settle");
+  const settle = promo.events.findLast((e) => e.event === "Settled");
+  // One line for each transaction, with the events it emitted: three payouts in one are "Paid ×3".
+  const txs: { hash: string; names: string[] }[] = [];
+  for (const e of promo.events) {
+    const last = txs.at(-1);
+    if (last?.hash === e.hash) last.names.push(e.event);
+    else txs.push({ hash: e.hash, names: [e.event] });
+  }
+  const byStream = promo.events.filter((e) => e.via === "stream").length;
+  const lastDelivery = promo.stream.lastDeliveryAt;
   const eventUrl = promo.eventTicker ? `https://api.gemini.com/v1/prediction-markets/events/${promo.eventTicker}` : null;
   return (
     <details className="mt-8 rounded-[10px] border border-line bg-card" open={open}>
@@ -269,17 +271,26 @@ function Proof({ promo, open }: { promo: Promo; open: boolean }) {
           <a className="underline underline-offset-2" href={`${KEEPER_URL}/promos/${promo.promoId}`} target="_blank" rel="noreferrer">
             Promo {promo.promoId} as the chain has it
           </a>
-          {promo.txs.length > 0 && (
+          {txs.length > 0 && (
             <span className="num mt-2 block space-y-1 text-[12px]">
-              {promo.txs.map((t) => (
+              {txs.map((t) => (
                 <a key={t.hash} className="block truncate underline underline-offset-2" href={explorerTx(t.hash)} target="_blank" rel="noreferrer">
-                  {t.action} · {t.hash}
+                  {t.names[0]}
+                  {t.names.length > 1 ? ` ×${t.names.length}` : ""} · {t.hash}
                 </a>
               ))}
             </span>
           )}
         </ProofRow>
-        <ProofRow label="The feed">Read from the keeper every few seconds. QuickNode Streams delivery is the next step.</ProofRow>
+        <ProofRow label="The feed">
+          {byStream > 0
+            ? `Delivered by QuickNode Streams: ${byStream} of this promo's ${promo.events.length} events came from a Stream on Arc Testnet that watches the vault's logs and posts them to the keeper. The keeper read the rest from the chain.`
+            : "RPC fallback: the keeper read this promo's events from the chain. A QuickNode Stream on Arc Testnet posts the vault's events to the keeper as they happen; none of this promo's came that way."}
+          {lastDelivery !== null && ` Last Stream delivery ${dayTime(lastDelivery)}.`}{" "}
+          <a className="underline underline-offset-2" href={`${KEEPER_URL}/feed`} target="_blank" rel="noreferrer">
+            The feed as the keeper has it
+          </a>
+        </ProofRow>
         <p className="num break-words text-[12px] text-ink/60">
           Event: {promo.eventTicker ?? "?"} Contract: {promo.contractLabel ?? "?"} Instrument: {promo.instrumentSymbol ?? "?"}
         </p>

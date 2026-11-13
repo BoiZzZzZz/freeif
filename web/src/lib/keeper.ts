@@ -99,7 +99,41 @@ export type Quoted = Price & { quote: QuoteJson; signature: `0x${string}` };
 
 export type PromoStatus = "Open" | "Settled" | "FinalizedYes" | "FinalizedNo" | "Vetoed" | "PaidOut" | "Voided";
 
-export type PromoTx = { at: number; action: string; hash: string };
+/**
+ * One event on the vault, as the keeper has it. `via` says how it reached the keeper: "stream" is a
+ * delivery from the QuickNode Stream, "rpc" is the keeper's own read of the chain.
+ */
+export type FeedEvent = {
+  id: string;
+  event:
+    | "PromoCreated"
+    | "ClaimRegistered"
+    | "Settled"
+    | "Vetoed"
+    | "SettlementReset"
+    | "Finalized"
+    | "Voided"
+    | "Paid"
+    | "PayoutFailed"
+    | "Deposited"
+    | "Withdrawn";
+  promoId: string | null;
+  block: number;
+  logIndex: number;
+  /** The transaction's hash. */
+  hash: string;
+  /** The block's time, unix seconds. */
+  at: number;
+  via: "stream" | "rpc";
+  /** When the keeper had it, unix milliseconds. */
+  seenAt: number;
+  customer?: string;
+  merchant?: string;
+  /** Base units: the cost, the payout, the refund, by event. */
+  amount?: string;
+  claimCount?: number;
+  outcomeYes?: boolean;
+};
 
 export type Promo = {
   promoId: string;
@@ -130,7 +164,10 @@ export type Promo = {
   settledAt: number;
   outcomeYes: boolean;
   hedgeMode: boolean;
-  txs: PromoTx[];
+  /** The promo's events on the vault, oldest first. */
+  events: FeedEvent[];
+  /** The QuickNode Stream's record: deliveries so far, and when the last one came (unix seconds). */
+  stream: { deliveries: number; lastDeliveryAt: number | null };
   customer: { address: string; number: number | null; paid: boolean; owed: string } | null;
 };
 

@@ -2,7 +2,7 @@
 // what is going on (prep/WIREFRAMES.md sections 6, 8 and 9.1).
 import type { CardState } from "@/components/receipt-card";
 import { capitalize, timeOf, usd } from "./format";
-import type { Promo } from "./keeper";
+import type { FeedEvent, Promo } from "./keeper";
 
 /** "Wings are free if the Lions win". Without an item: "Free if the Lions win". */
 export function promoTitle(item: string | null | undefined, condition: string | null | undefined): string {
@@ -93,30 +93,65 @@ export function statusLine(p: Promo, now: number, merchant: boolean): StatusLine
   }
 }
 
-/** One line of the promo page's feed, newest first. */
-export type FeedLine = { at: number; text: string; hash: string };
-
-const ACTIONS: Record<string, (p: Promo, n: number) => string> = {
-  registerClaim: (_p, n) => `Customer ${n} covered`,
-  // "Result: the Lions won".
-  settle: (p) => {
-    const what = p.outcomeYes ? won(p) : lost(p);
-    return `Result: ${what[0]!.toLowerCase()}${what.slice(1, -1)}`;
-  },
-  finalize: () => "Result confirmed",
-  payoutBatch: (p) => `Customers paid ${usd(p.payoutPerClaim)} each`,
-  retryPayout: (p) => `A customer was paid ${usd(p.payoutPerClaim)}`,
+/** One line of the promo page's feed. */
+export type FeedLine = {
+  id: string;
+  /** The block's time, unix seconds. */
+  at: number;
+  text: string;
+  /** The transaction's hash. */
+  hash: string;
+  /** How the event reached the keeper: the QuickNode Stream's delivery, or the keeper's read of the chain. */
+  via: "stream" | "rpc";
+  /** How long after the block the keeper had it. Null for an event read back later. */
+  lagMs: number | null;
 };
 
-/** The feed, from the transactions the keeper sent for this promo. */
-export function feedLines(p: Promo): FeedLine[] {
-  let customer = 0;
+/** The feed, newest first: one line for each event on the promo (prep/WIREFRAMES.md section 9.2). */
+export function feedLines(p: Promo, merchant: boolean): FeedLine[] {
+  // A customer is a number on this page, never an address: their place in line.
+  const places = new Map<string, number>();
+  for (const e of p.events) {
+    if (e.event === "ClaimRegistered" && e.customer) places.set(e.customer.toLowerCase(), e.claimCount ?? places.size + 1);
+  }
+  const who = (e: FeedEvent): string => {
+    const place = e.customer ? places.get(e.customer.toLowerCase()) : undefined;
+    return place === undefined ? "A customer" : `Customer ${place}`;
+  };
+  const describe = (e: FeedEvent): string | null => {
+    switch (e.event) {
+      case "PromoCreated":
+        return `Promo started. ${merchant ? "You" : "The shop"} paid ${usd(e.amount)}.`;
+      case "ClaimRegistered":
+        return `${who(e)} covered`;
+      case "Settled": {
+        // "Result: the Lions won".
+        const what = e.outcomeYes ? won(p) : lost(p);
+        return `Result: ${what[0]!.toLowerCase()}${what.slice(1, -1)}`;
+      }
+      case "Vetoed":
+        return "The result is being checked";
+      case "SettlementReset":
+        return "The result was taken back. Waiting for it again.";
+      case "Finalized":
+        return "Result confirmed";
+      case "Voided":
+        return `Game cancelled. ${usd(e.amount)} refunded.`;
+      case "Paid":
+        return `${who(e)} paid ${usd(e.amount)}`;
+      case "PayoutFailed":
+        return `${who(e)}'s ${usd(e.amount)} is waiting. We'll send it again.`;
+      default:
+        return null;
+    }
+  };
+
   const lines: FeedLine[] = [];
-  for (const tx of p.txs) {
-    const describe = ACTIONS[tx.action];
-    if (!describe) continue;
-    if (tx.action === "registerClaim") customer++;
-    lines.push({ at: tx.at, text: describe(p, customer), hash: tx.hash });
+  for (const e of p.events) {
+    const text = describe(e);
+    if (text === null) continue;
+    const lag = e.seenAt - e.at * 1000;
+    lines.push({ id: e.id, at: e.at, text, hash: e.hash, via: e.via, lagMs: lag < 60_000 ? Math.max(lag, 0) : null });
   }
   return lines.reverse();
 }
