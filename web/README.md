@@ -101,12 +101,12 @@ On Vercel the two Circle values are project variables. On a developer machine th
 | `src/lib/events.ts` | The keeper's event stream in the browser, reopened by itself after the keeper restarts |
 | `src/components/odds-chart.tsx`, `src/lib/use-odds.ts` | The chart on the promo page, and the readings behind it |
 | `src/lib/promo.ts`, `format.ts` | A promo in words; money and times as people read them |
-| `src/lib/server/` | Circle's API, the chain reads, the permit and the promo call |
+| `src/lib/server/` | Circle's API, the chain reads, the permit and the promo call, and the limit on how often one address may call the routes |
 | `src/lib/abi.ts` | Copied from the keeper |
 
 ## Known limits
 
-- The `/api/wallet` routes have no rate limit, and `email-token` sends an email to any address it is given.
+- The `/api/wallet` routes are limited per address (`src/lib/server/limit.ts`): 240 calls a minute over all of them, and 20 login codes in ten minutes, each code being an email to whatever address was typed. The counts are in the server's memory and Vercel can run more than one copy of the server, so this stops a loop, not a determined sender. Circle has its own limit on the codes sent to one email address.
 - The claim page sends the customer's login token to the keeper with the claim, and the keeper asks Circle whose it is: one claim per login per promo, for that login's own account. The token is a credential for an hour; it goes to the keeper over HTTPS and is not stored there.
 - Buttons, inputs, the bottom sheet and the chart are written by hand, not taken from a component library. The sheet does not trap focus on purpose: Circle's window is an iframe on the page and has to sit above it.
 - A login lasts one hour (Circle's user token). After that the app asks for the email again.

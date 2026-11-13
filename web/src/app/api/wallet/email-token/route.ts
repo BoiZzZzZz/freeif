@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { circle } from "@/lib/server/circle";
 import { post, Refusal, text } from "@/lib/server/http";
+import { LOGIN_CODES } from "@/lib/server/limit";
 
 type Tokens = { deviceToken: string; deviceEncryptionKey: string; otpToken: string };
 
@@ -26,4 +27,4 @@ export const POST = post(async (body) => {
     throw new Refusal(502, "no-code", "We couldn't send a code right now. Try again in a moment.");
   }
   return { deviceToken: tokens.deviceToken, deviceEncryptionKey: tokens.deviceEncryptionKey, otpToken: tokens.otpToken };
-});
+}, { rule: LOGIN_CODES, message: "Too many codes were asked for from this connection. Try again in a few minutes." });

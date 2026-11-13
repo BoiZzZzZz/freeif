@@ -3,6 +3,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { clientOf, EVERY_ROUTE, take, type Rule } from "./limit";
 
 export class Refusal extends Error {
   status: number;
@@ -18,10 +19,22 @@ export const NOT_CHARGED = "The payment didn't go through. You were not charged.
 
 type Body = Record<string, unknown>;
 
-/** Wraps a POST handler: parses the JSON body and turns a thrown `Refusal` into its response. */
-export function post(run: (body: Body) => Promise<unknown>): (request: Request) => Promise<Response> {
+const TOO_MANY = "That's a lot of requests at once. Try again in a minute.";
+
+/**
+ * Wraps a POST handler: counts the request against its limits, parses the JSON body and turns a thrown
+ * `Refusal` into its response. `limit` is a route's own limit, on top of the one every route shares.
+ */
+export function post(
+  run: (body: Body) => Promise<unknown>,
+  limit?: { rule: Rule; message: string },
+): (request: Request) => Promise<Response> {
   return async (request) => {
     try {
+      // Before the body is read, so a request that is turned away costs nothing.
+      const who = clientOf(request);
+      if (take(EVERY_ROUTE, who) > 0) throw new Refusal(429, "too-many", TOO_MANY);
+      if (limit && take(limit.rule, who) > 0) throw new Refusal(429, "too-many", limit.message);
       const body = (await request.json().catch(() => null)) as Body | null;
       if (body === null || typeof body !== "object") throw new Refusal(400, "bad-request", "The request was not understood.");
       return Response.json(await run(body));
