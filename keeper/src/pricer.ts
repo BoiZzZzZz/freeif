@@ -108,6 +108,12 @@ type Deps = {
 /** The search for the most one promo could pay stops at ten million dollars. */
 const MOST_CENTS = 1_000_000_000;
 
+/** An event read this recently is not read again: a form asks for its price every 15 seconds. */
+const EVENT_FRESH_SECONDS = 30;
+/** When Gemini does not answer, an event read this recently is used as it was. */
+const EVENT_KEPT_SECONDS = 600;
+const MAX_EVENTS_KEPT = 200;
+
 /** Gemini's book in the pricing math's units. The last trade comes from the event: the book route has none. */
 function bookOf(depth: Depth | null, contract: GeminiContract): DeepBook {
   return {
@@ -143,6 +149,8 @@ type Prepared = {
 export class Pricer {
   readonly #d: Deps;
   #queue: Promise<unknown> = Promise.resolve();
+  /** Events as Gemini last gave them, by ticker, with the time they were read. */
+  readonly #events = new Map<string, { at: number; event: GeminiEvent }>();
 
   constructor(deps: Deps) {
     this.#d = deps;
@@ -248,16 +256,53 @@ export class Pricer {
     return { ...this.#toJson(p), quote: quoteToJson(quote), signature };
   }
 
+  /**
+   * The event behind a price: its names, its times, its status and its last trade. None of that is the
+   * price, which is read from the book every time, so an event is kept for half a minute, and for ten
+   * when Gemini does not answer: its single-event route is a megabyte for a game and is slow now and then.
+   */
+  async #event(ticker: string): Promise<GeminiEvent | null> {
+    const held = this.#events.get(ticker);
+    const now = this.#now();
+    if (held && now - held.at < EVENT_FRESH_SECONDS) return held.event;
+    try {
+      const event = await (this.#d.fetchEvent ?? getEvent)(ticker);
+      if (event) {
+        this.#events.delete(ticker);
+        this.#events.set(ticker, { at: now, event });
+        // The oldest read goes first.
+        for (const key of this.#events.keys()) {
+          if (this.#events.size <= MAX_EVENTS_KEPT) break;
+          this.#events.delete(key);
+        }
+      }
+      return event;
+    } catch (err) {
+      if (held && now - held.at < EVENT_KEPT_SECONDS) {
+        console.error(`[pricer] Gemini did not answer for ${ticker}; using the event as read ${now - held.at}s ago:`, (err as Error).message);
+        return held.event;
+      }
+      throw err;
+    }
+  }
+
+  /** The contract's book, asked for a second time when the first try fails: it is a small, quick read. */
+  async #depth(symbol: string): Promise<Depth | null> {
+    const read = this.#d.fetchDepth ?? getDepth;
+    try {
+      return await read(symbol);
+    } catch {
+      return read(symbol);
+    }
+  }
+
   async #prepare(req: PriceRequest): Promise<Prepared> {
     if (req.payoutPerClaim <= 0n) throw new Refusal("bad-request", "The amount per customer must be more than zero.");
     if (!Number.isInteger(req.maxClaims) || req.maxClaims < 1 || req.maxClaims > 0xffffffff) {
       throw new Refusal("bad-request", "The number of customers must be at least 1.");
     }
 
-    const [event, depth] = await Promise.all([
-      (this.#d.fetchEvent ?? getEvent)(req.eventTicker),
-      (this.#d.fetchDepth ?? getDepth)(req.instrumentSymbol),
-    ]);
+    const [event, depth] = await Promise.all([this.#event(req.eventTicker), this.#depth(req.instrumentSymbol)]);
     const fetchedAt = this.#now();
     if (!event) throw new Refusal("unknown-event", "We could not find this event.");
     const contract = event.contracts.find((c) => c.instrumentSymbol === req.instrumentSymbol);

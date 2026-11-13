@@ -570,7 +570,8 @@ export function makeApp(d: Deps): Hono {
     const series = c.req.query("series") ?? "BTC05M";
     if (!/^[A-Z]+(05|15)M$/.test(series)) throw new BadRequest("series must look like BTC05M or ETH15M");
     const windows = upcomingIntervalTickers(series, new Date(), 4);
-    const events = await Promise.all(windows.map((w) => getEvent(w.ticker)));
+    // A window Gemini does not answer for is left out; the others are still listed.
+    const events = await Promise.all(windows.map((w) => getEvent(w.ticker).catch(() => null)));
     return c.json({
       series,
       windows: windows.flatMap((w, i) => {

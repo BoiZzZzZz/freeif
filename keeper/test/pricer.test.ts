@@ -333,6 +333,101 @@ test("getPrice_maxPayout_isTheMostOnePromoCouldPay", async () => {
   assert.equal(over.limit, "exposure");
 });
 
+test("getPrice_whenGeminisEventRouteFails_usesTheEventItReadAMomentAgo_andStillReadsTheBook", async () => {
+  const book: Depth = { bid: "0.38", asks: [{ price: "0.39", amount: "9000.0" }] };
+  const asked = { event: 0, book: 0 };
+  let down = false;
+  const clock = { now: NOW };
+  const pricer = new Pricer({
+    client: {
+      getBlockNumber: async () => 1n,
+      multicall: async ({ contracts }: { contracts: { functionName: string }[] }) =>
+        contracts[0]?.functionName === "balanceOf" ? [20_000n * USDC, 0n, 2000, false] : [],
+    } as unknown as PublicClient,
+    vault: VAULT,
+    usdc: TOKEN,
+    account: privateKeyToAccount(generatePrivateKey()),
+    claimSigner: RELAYER,
+    params,
+    timing: { quoteTtlSeconds: 90, intervalCutoffSeconds: 60, minClaimWindowSeconds: 30 },
+    store: new Store(null),
+    now: () => clock.now,
+    fetchEvent: async () => {
+      asked.event++;
+      if (down) throw new Error("The operation was aborted due to timeout");
+      // Kickoff is five minutes away.
+      return game({ startTime: iso(NOW + 300) });
+    },
+    fetchDepth: async () => {
+      asked.book++;
+      return book;
+    },
+  });
+
+  assert.equal((await pricer.getPrice(wings)).breakdown.chance, 0.39);
+  // Fifteen seconds later, the form's next read: the event is not asked for again, the book is.
+  clock.now += 15;
+  book.asks[0]!.price = "0.41";
+  assert.equal((await pricer.getPrice(wings)).breakdown.chance, 0.41);
+  assert.deepEqual(asked, { event: 1, book: 2 });
+
+  // Gemini's event route stops answering. The price is still live: it comes from the book.
+  down = true;
+  clock.now += 60;
+  book.asks[0]!.price = "0.44";
+  assert.equal((await pricer.getPrice(wings)).breakdown.chance, 0.44);
+  assert.equal(asked.event, 2);
+  // The kickoff the kept event names still closes the promo.
+  clock.now = NOW + 300;
+  await refusal(pricer.getPrice(wings), "event-started");
+
+  // Ten minutes without an answer: the event is too old to go by.
+  const stale = new Pricer({
+    client: { getBlockNumber: async () => 1n, multicall: async () => [20_000n * USDC, 0n, 2000, false] } as unknown as PublicClient,
+    vault: VAULT,
+    usdc: TOKEN,
+    account: privateKeyToAccount(generatePrivateKey()),
+    claimSigner: RELAYER,
+    params,
+    timing: { quoteTtlSeconds: 90, intervalCutoffSeconds: 60, minClaimWindowSeconds: 30 },
+    store: new Store(null),
+    now: () => clock.now,
+    fetchEvent: async () => {
+      if (down) throw new Error("timeout");
+      return game();
+    },
+    fetchDepth: async () => book,
+  });
+  clock.now = NOW;
+  down = false;
+  await stale.getPrice(wings);
+  down = true;
+  clock.now = NOW + 601;
+  await assert.rejects(stale.getPrice(wings), /timeout/);
+});
+
+test("getPrice_theBookRoute_isAskedTwiceBeforeThePriceFails", async () => {
+  let tries = 0;
+  const flaky = new Pricer({
+    client: { getBlockNumber: async () => 1n, multicall: async () => [20_000n * USDC, 0n, 2000, false] } as unknown as PublicClient,
+    vault: VAULT,
+    usdc: TOKEN,
+    account: privateKeyToAccount(generatePrivateKey()),
+    claimSigner: RELAYER,
+    params,
+    timing: { quoteTtlSeconds: 90, intervalCutoffSeconds: 60, minClaimWindowSeconds: 30 },
+    store: new Store(null),
+    now: () => NOW,
+    fetchEvent: async () => game(),
+    fetchDepth: async () => {
+      if (++tries % 2 === 1) throw new Error("Gemini 503");
+      return { bid: "0.38", asks: [{ price: "0.39", amount: "9000.0" }] };
+    },
+  });
+  assert.equal((await flaky.getPrice(wings)).breakdown.chance, 0.39);
+  assert.equal(tries, 2);
+});
+
 test("signQuote_overCapacity_saysHowManyCustomersFit", async () => {
   const { pricer } = setup(game());
   const err = await refusal(pricer.signQuote({ ...wings, maxClaims: 305, merchant: MERCHANT }), "over-capacity");
