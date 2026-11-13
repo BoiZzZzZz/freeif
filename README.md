@@ -2,7 +2,70 @@
 
 Merchants run "your purchase is free if X happens" promotions. A USDC vault on Arc underwrites each promo at live Gemini prediction-market odds plus a spread. When Gemini settles the market, every registered customer is paid automatically.
 
-Built for the UBC Hackathon 2026 (DeFi track). Work in progress: this README grows as each part lands.
+Built for the UBC Hackathon 2026 (DeFi track), by one person, starting Nov 12. It runs on Arc testnet with test dollars.
+
+| | |
+|---|---|
+| Try it | [`https://freeif.app/merchant`](https://freeif.app/merchant) (add `?mechanics=1` to see where each number comes from) |
+| The contract | [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d) on Arc testnet, verified |
+| Sponsor sections | [How Arc is used](#how-arc-is-used) · [How Gemini is used](#how-gemini-is-used) · [The QuickNode Stream](#the-quicknode-stream) |
+| For the track | [Economic design](#economic-design) · [Risks and assumptions](#risks-and-assumptions) |
+
+## The problem
+
+"Buy it today, and it is free if our team wins" is an old promotion, and it works. In 2007 Jordan's Furniture refunded about 30,000 customers when the Red Sox won the World Series, and an insurance policy paid for it ([NPR](https://www.npr.org/transcripts/15636597)). That policy is prize-indemnity insurance: written by negotiation, for promotions large enough to be worth an underwriter's time.
+
+Below that size a merchant is on their own. In 2019 the owner of Houston's Gallery Furniture could not get a quote he would accept, so he covered his World Series promotion himself with about $13 million of sportsbook bets ([KTVZ](https://ktvz.com/news/2019/10/31/houstons-mattress-mack-lost-13-million-in-bets-on-the-astros-world-series-loss-but-says-hed-do-it-again/)). In June 2026 a bar in Washington DC tied its tabs to a World Cup game and covered it by buying prediction-market contracts by hand ([Axios](https://www.axios.com/local/washington-dc/2026/06/17/dc-bar-free-tabs-world-cup-kalsh-team-usa)).
+
+A pizza shop has no underwriter to call and should not need a trading account. Run without cover, the promotion is a bet the shop loses on its busiest night.
+
+## What FreeIf does
+
+It sells that cover as one fixed price, paid once, and pays the customers itself.
+
+1. **The shop sets it up** ([`/merchant`](https://freeif.app/merchant), under a minute). Pick a game and a team from a list, say what is free and what it costs, and how many customers. The form shows the chance, the most the shop could owe, and one cost: for wings at $8 for two customers if the Patriots win, $7.06 when the chance was 42%. Pay with an email login. The shop gets a code for its counter.
+2. **A customer gets covered** (`/claim/[id]`, about ten seconds). Scan the code, type an email and the 6-digit code it is sent. The card reads "Wings", "$8.00", "Free if the Patriots win", and is stamped COVERED. No app, no fee, nothing to install.
+3. **The game is played.** Nobody does anything. The promo's page shows how the chance moves.
+4. **The result comes in.** Gemini settles the market, the keeper posts the result to the vault, and after a dispute window the vault pays every covered customer. The card turns over: "$8.00", "✓ PAID". If the team loses, nobody is owed anything and the shop has paid what it agreed to pay.
+
+Behind it is a vault of USDC on Arc. Liquidity providers fund it ([`/lp`](https://freeif.app/lp)); every promo's whole payout is locked in it until the result; the price of a promo is what its hedge would cost on Gemini's prediction market, plus 5%.
+
+The same contract also pays the shop itself. "My business gets paid" on the form sells a cover: a fixed amount to the business if a day's high temperature in its city lands in a range it picks, priced from Gemini's daily temperature markets. [Promo 21](https://freeif.app/promo/21) is the first: $2.00 to a test shop if the high in Austin on November 14 is 66°F or below, for $0.80.
+
+Merchant and customer screens never say prediction market, USDC, wallet or gas. One switch (`?mechanics=1`, or the link in the footer) shows what is under each number: the Gemini contract and its order book, the signed quote, the transactions on Arc, how each event reached the page.
+
+## How it fits together
+
+```mermaid
+flowchart TB
+  merchant["Shop owner<br/>/merchant"]
+  customer["Customer<br/>/claim"]
+  pages["Promo page and vault page<br/>/promo, /lp"]
+  lp["Liquidity provider<br/>/lp, browser wallet"]
+  keeper["Keeper (Node, Railway)<br/>pricing, claim relayer, settlement loop,<br/>odds history, hedge, event feed"]
+  vault[["PromoVault<br/>Arc testnet"]]
+  gemini[("Gemini<br/>prediction markets")]
+  sandbox[("Gemini<br/>sandbox exchange")]
+  circle[("Circle<br/>email accounts")]
+  stream(["QuickNode Stream"])
+
+  merchant -->|"live price, signed quote"| keeper
+  merchant -->|"one transaction: permit + createPromoWithPermit"| vault
+  customer -->|"claim, with the email login"| keeper
+  keeper -->|"whose login is this?"| circle
+  keeper -->|"registerClaim, settle, finalize, payoutBatch"| vault
+  lp -->|"deposit, withdraw"| vault
+  gemini -->|"order book, events, results"| keeper
+  keeper -->|"hedge order"| sandbox
+  vault -->|"logs of every block"| stream
+  stream -->|"signed webhook"| keeper
+  keeper -->|"status, and each event as it happens"| pages
+```
+
+- **`PromoVault`** holds all the money and enforces every rule about it: who may create a promo and at what price (a quote signed by the pricer), what is locked, who is covered, when a result is final, who is paid.
+- **The keeper** is one Node process. It reads Gemini, prices promos and signs quotes, registers customers, posts results and pays, places each promo's hedge order on Gemini's sandbox, and passes the vault's events to the pages. It holds three keys (pricer, oracle, relayer) and no customer money.
+- **The web app** is what people see. Accounts are Circle user-controlled wallets behind an email code; a merchant's payment is one transaction from that account.
+- **The QuickNode Stream** carries the vault's events from the chain to the keeper, which pushes them to every open page.
 
 ## Layout
 
@@ -20,6 +83,56 @@ Built for the UBC Hackathon 2026 (DeFi track). Work in progress: this README gro
 | App | [`https://freeif.app`](https://freeif.app): [`/merchant`](https://freeif.app/merchant) sets up a promo, `/claim/[id]` covers a customer, `/promo/[id]` is its status page, [`/lp`](https://freeif.app/lp) is the vault for liquidity providers. Add `?mechanics=1` to see where each number comes from. Details in [`web/README.md`](web/README.md) |
 | Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
 | First payout | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
+| So far (Nov 13) | 22 promos created. 19 have run to their end: 9 paid their customers, 10 ended "no". Three are open: two on Sunday's Patriots at Lions game and one on Saturday's high in Austin |
+| Demo video | Added with the submission |
+
+## Economic design
+
+**Who pays whom.** A merchant pays a premium once, when the promo is created. The vault locks the promo's whole payout (customers × amount each) from that moment, premium included, until there is a result. On a "yes" each covered customer is paid the amount, and the part nobody claimed goes back to the vault. On a "no" the lock is released and the premium stays in the vault: that is what liquidity providers earn.
+
+**The price.** `premium = chance × payout × (1 + spread)`, rounded up to a cent.
+
+- The chance is what a dollar of the promo's payout would cost as "yes" contracts on Gemini right now, bought from the order book's offers, cheapest first. For a promo that fits inside the best offer that is the ask. It is the cost of the vault's hedge, so a promo is never sold below what laying it off would cost.
+- The spread is 5%. The part of a payout that Gemini's book does not offer cannot be hedged, and carries 15%. A book with a side missing carries 15% on all of it, and is refused when the result has never traded.
+- Worked example: Lions to win at an ask of 0.39, $20 back for each of 200 customers. The most the vault can owe is $4,000. The expected loss is $1,560, the premium is $1,638, and the vault's own money at risk is $2,362. The merchant pays 41% of the face value for a 39% event.
+- A quote is signed by the pricer key (EIP-712), names the merchant, expires in 90 seconds and can be used once. `createPromo` accepts nothing else.
+
+**Limits.** Three, and a promo must pass all of them.
+
+| Limit | Where | What it stops |
+|---|---|---|
+| One promo may put at most 20% of the vault's free balance at risk (`maxPayout - premium`) | The contract (`maxExposureBps`); the pricing service uses 90% of it | One promo taking the vault down |
+| No more than 60% of the vault may be locked, counting quotes that are signed and still usable | The pricing service | Many promos doing it together. The contract has no cap across promos |
+| The premium may not exceed the payout | Both | Selling a result that is nearly certain |
+
+**Collateral.** `lockedCollateral` is the sum of every promo's lock plus payouts that failed and wait. Every function that moves USDC keeps `balance >= lockedCollateral`, and a withdrawal is priced on `balance - lockedCollateral`, so a liquidity provider leaving can never reach a promo's payout. This is the property the tests lean on hardest: 215 unit and fuzz tests, and a stateful invariant run that makes random legal calls and checks it after every one.
+
+**Shares.** Liquidity providers hold proportional shares, and there are two prices.
+
+- A withdrawal is priced on the free balance: the least the shares can be worth.
+- A deposit is priced on the free balance plus the locks of promos with no final result: the most they can be worth. Priced any lower, a deposit made just before a lock is released would take the lock from the providers who carried the risk. A review before the first deploy found exactly that. It was fixed, with tests that fail on the old code, before anything was deployed.
+- The cost of the two prices: a provider who leaves while promos are open gives up their part of the locks to those who stay. [`/lp`](https://freeif.app/lp) shows "withdrawable now" next to "your part of locks" and says what a withdrawal leaves behind before it is made.
+
+**The hedge.** A "yes" contract pays $1, so one contract per dollar of payout is the other side of the vault's position. In the worked example the full hedge costs $1,560 of the $1,638 premium and leaves the $78 spread with no risk. The keeper places that order for every open promo on Gemini's sandbox exchange and keeps its id with the promo. It is a sandbox order: no money moves, and the vault as built carries each promo's risk itself. Moving USDC to Gemini and back is not built.
+
+**What the vault has done.** On Nov 13 it held $65.58 with $26.00 locked for three open promos, and was up $3.74 on the 19 promos that had finished (premiums kept, less payouts). The page has the numbers as they are now.
+
+## Risks and assumptions
+
+This is a testnet demo, unaudited. What it trusts, and what can go wrong:
+
+- **The result is posted by one key.** The oracle key posts Gemini's result. The contract checks that the event id it is given hashes to the one stored when the promo was sold, and emits the id and Gemini's `resolutionSide` as plain text, so anyone can compare a settlement with Gemini's own answer. A result is not final until a dispute window has passed (an hour by default; the deployed vault runs test promos with 30 seconds), and the owner can veto it within that window. Nobody else can. A wrong result that is posted and not vetoed is paid.
+- **The price is signed by one key.** A pricer that signs a price too low gives the vault's money away, inside the limits above. The limits are the contract's 20% per promo and the pricing service's 60% in all.
+- **The owner is trusted.** The owner can pause new promos, change the limits and windows, veto a result, void a promo whose market never settles (the merchant is refunded), and replace the pricer and the oracle. An owner who replaces them controls prices and results. A pause cannot trap money: withdrawals, settlement, payouts and refunds work while paused. A multisig and a timelock are roadmap.
+- **The vault is not hedged.** The hedge is a sandbox order. Promos on the same game win or lose together, and the only limit across promos is the pricing service's.
+- **Gemini's price can be thin or wrong.** The chance comes from one order book. A book with one side, or with its sides more than half a dollar apart, is priced with a wider spread or refused, and a promo bigger than the offers pays more for the part past them. A real hedge would also carry basis risk: Gemini's sandbox is not its live exchange, and a quote is good for 90 seconds while the book moves.
+- **Liquidity providers.** Leaving while promos are open forfeits a part of their locks (above). A deposit made while promos are open takes their loss side and none of their premium.
+- **Who is a customer.** Nothing on chain proves that a covered customer bought anything. The controls are the code at the counter, one cover per email login per promo (the keeper asks Circle whose login a claim carries), and the customer cap the merchant paid for. The fix is the till issuing the claim.
+- **Accounts.** Merchant and customer accounts are Circle user-controlled wallets behind an email code. Whoever controls the email controls the account.
+- **A payout that fails.** A transfer that fails does not stop a batch: that payout is set aside inside the lock and sent again. USDC has a blocklist; a promo whose merchant is on it cannot be voided, and is settled instead.
+- **No reentrancy guard.** State changes come before transfers, and on Arc a USDC transfer runs no code at the receiving address (checked by simulation). The token is a proxy: if it is upgraded, that has to be checked again.
+- **One keeper.** If it stops, nothing is lost: `finalize` and `payoutBatch` can be called by anyone, and only `settle` needs the oracle. Quotes and claims stop until it is back.
+- **Regulation.** Cover for a promotion is sold in the United States as prize-indemnity insurance, and insurance is a licensed business. A real launch would need a licensed carrier behind the vault. Customers and merchants here never trade a contract: the vault is the only party with a position on the market. This is a hackathon project, not legal advice.
 
 ## How Arc is used
 
@@ -108,6 +221,16 @@ What was measured on Nov 13, on the first four promos run with the Stream on ([1
 Open one of those promos: the top of the page says "Live · QuickNode Stream", and each line under "What's happening" says how it came and how long after its block.
 
 The Stream is made, tested, paused and removed by one script, `keeper/scripts/stream.ts` (`pnpm stream on`, `test`, `off`, `status`, `remove`), so its settings are in the repo. A Stream is billed for every block it reads, so it is paused when nobody is watching; the pages then run on the keeper's own read and say "RPC".
+
+## Roadmap
+
+1. **A real hedge.** Send part of each premium to Gemini, buy the contracts, bring the proceeds back. It needs a path for the vault's money that the contract does not have, and it turns the vault's risk into basis risk.
+2. **A fair exit for liquidity providers.** A withdrawal queue, or accounting per promo, so leaving while promos are open does not forfeit a part of their locks.
+3. **Less trust.** The cap across promos in the contract. A second reporter and a dispute oracle for results. A multisig owner with a timelock.
+4. **Claims from the till.** A point-of-sale integration that issues the claim with the receipt, so only a purchase can be covered.
+5. **More to cover.** Any market Gemini lists can be a promo or a cover; the form offers five sports leagues and daily temperatures today.
+6. **Money out.** Cash out sends test dollars to an address. A bank or a card comes with a payments partner.
+7. **A pilot.** A handful of bars and pizza shops for one season, with a licensed prize-indemnity carrier behind the vault.
 
 ## Run the contract tests
 
