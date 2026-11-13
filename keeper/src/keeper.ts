@@ -7,6 +7,7 @@ import { promoVaultAbi } from "./abi.ts";
 import { Status, explorerTx, statusName, type PublicClient, type WalletClient } from "./chain.ts";
 import { getEvent, listEvents, type GeminiContract, type GeminiEvent } from "./gemini.ts";
 import { revertName } from "./relayer.ts";
+import { sleep } from "./sleep.ts";
 import type { Store } from "./store.ts";
 
 type Deps = {
@@ -41,6 +42,9 @@ export class Keeper {
   readonly #paidOut = new Set<bigint>();
   /** What was last logged for a promo that is waiting, so the log says it once. */
   readonly #waiting = new Map<bigint, string>();
+  /** Ends the pause between two passes early. Set only while the loop is pausing. */
+  #wake: (() => void) | null = null;
+  #nudged = false;
 
   constructor(deps: Deps) {
     this.#d = deps;
@@ -52,6 +56,15 @@ export class Keeper {
 
   #log(line: string): void {
     (this.#d.log ?? console.log)(`[keeper] ${line}`);
+  }
+
+  /**
+   * Starts the next pass now instead of at the end of the pause. The feed calls it when an event means
+   * there is a step to take: a result that was just confirmed has customers to pay.
+   */
+  nudge(): void {
+    this.#nudged = true;
+    this.#wake?.();
   }
 
   /** One pass over every promo. Returns the number of transactions sent. */
@@ -223,6 +236,7 @@ export class Keeper {
     this.#log(`loop every ${loopMs / 1000}s as ${this.address}`);
     let lastRetry = 0;
     while (!signal.aborted) {
+      this.#nudged = false;
       try {
         await this.tick();
         if (Date.now() - lastRetry >= retryMs) {
@@ -232,10 +246,9 @@ export class Keeper {
       } catch (err) {
         this.#log(`pass failed: ${(err as Error).message}`);
       }
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, loopMs);
-        signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
-      });
+      // A nudge that came during the pass is not lost: the next pass starts at once.
+      if (!this.#nudged) await sleep(loopMs, signal, (wake) => { this.#wake = wake; });
+      this.#wake = null;
     }
   }
 }

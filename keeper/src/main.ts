@@ -1,4 +1,4 @@
-// One process: the pricing API, the claim relayer and the settlement loop.
+// One process: the pricing API, the claim relayer, the settlement loop and the Stream's webhook.
 import { serve } from "@hono/node-server";
 import { privateKeyToAccount } from "viem/accounts";
 import { promoVaultAbi } from "./abi.ts";
@@ -11,6 +11,7 @@ import { Pricer } from "./pricer.ts";
 import { Relayer } from "./relayer.ts";
 import { makeApp } from "./server.ts";
 import { Store } from "./store.ts";
+import { Feed } from "./stream.ts";
 
 const vault = config.vaultAddress();
 const usdc = config.usdcAddress();
@@ -49,7 +50,30 @@ const pricer = new Pricer({
 const keeper = new Keeper({ client, wallet: oracleWallet, vault, store });
 const games = new Games({ spreadBps: config.pricingParams().spreadBps, minLeadSeconds: timing.minClaimWindowSeconds });
 
-const app = makeApp({ client, vault, pricer, games, relayer, oracle: keeper.address, store, testKey: config.claimTestKey() });
+// The vault's events: delivered by the QuickNode Stream to `POST /stream`, and read from the chain by
+// the keeper itself for whatever the Stream has not delivered.
+const feedSettings = config.feedSettings();
+const feed = new Feed({ store, vault, client, graceMs: feedSettings.graceMs, startBlock: feedSettings.startBlock });
+// An event that means there is a step to take starts the next pass of the loop at once: a "yes" that
+// was just confirmed has customers to pay, and a settlement that was reset has a result to post again.
+feed.subscribe((event) => {
+  if ((event.event === "Finalized" && event.outcomeYes) || event.event === "SettlementReset") keeper.nudge();
+});
+const streamSecret = config.streamSecret();
+if (streamSecret === undefined) console.log("[feed] QUICKNODE_STREAM_SECRET is not set: POST /stream refuses every delivery");
+
+const app = makeApp({
+  client,
+  vault,
+  pricer,
+  games,
+  relayer,
+  oracle: keeper.address,
+  store,
+  feed,
+  testKey: config.claimTestKey(),
+  streamSecret,
+});
 const server = serve({ fetch: app.fetch, port: config.port(), hostname: "0.0.0.0" }, (info) => {
   console.log(`[server] listening on ${info.port}; vault ${vault}; RPCs: ${config.rpcUrls().length}`);
 });
@@ -64,4 +88,5 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     server.close();
   });
 }
+void feed.run(feedSettings.intervalMs, stop.signal);
 await keeper.run(timing.loopMs, timing.retryMs, stop.signal);

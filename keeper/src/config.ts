@@ -52,6 +52,22 @@ export const circleApiKey = (): string => env("CIRCLE_API_KEY");
 /** Lets the test loop register customers that have no login. Leave it unset to turn that off. */
 export const claimTestKey = (): string | undefined => optional("CLAIM_TEST_KEY");
 
+/**
+ * The secret the QuickNode Stream sends with every delivery, in the header `x-stream-secret`. Unset,
+ * `POST /stream` refuses everything and the feed is filled from the chain alone.
+ */
+export const streamSecret = (): string | undefined => optional("QUICKNODE_STREAM_SECRET");
+
+/** How the keeper reads the chain's logs for events the Stream has not delivered. */
+export const feedSettings = () => ({
+  /** Pause between two reads. */
+  intervalMs: int("FEED_RPC_MS", 2_000),
+  /** How long a log waits for the Stream before the keeper takes it from the chain itself. */
+  graceMs: int("FEED_GRACE_MS", 4_000),
+  /** Where the first read starts. Unset, the keeper finds the vault's first block by itself. */
+  startBlock: optional("FEED_START_BLOCK") === undefined ? undefined : int("FEED_START_BLOCK", 0),
+});
+
 /** Pricing settings (SPEC section 2). All of them can be changed without a deploy. */
 export function pricingParams(): PricingParams {
   return {

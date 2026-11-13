@@ -1,8 +1,12 @@
-// The keeper's HTTP API: prices and signed quotes for the merchant form, claims for the customer page.
+// The keeper's HTTP API: prices and signed quotes for the merchant form, claims for the customer page,
+// the QuickNode Stream's webhook, and the vault's events for the pages that show a promo.
 // Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seconds.
 import { createHash, timingSafeEqual } from "node:crypto";
-import { Hono } from "hono";
+import { gunzipSync } from "node:zlib";
+import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
+import { streamSSE } from "hono/streaming";
 import { createPublicClient, http, isAddress, type Address } from "viem";
 import { promoVaultAbi } from "./abi.ts";
 import { CHAIN_ID, rpcUrls } from "./config.ts";
@@ -12,7 +16,9 @@ import { getEvent, priceToBps, upcomingIntervalTickers } from "./gemini.ts";
 import { cleanText, findLabel } from "./labels.ts";
 import { Pricer, Refusal, type PriceRequest } from "./pricer.ts";
 import { ClaimRefusal, Relayer } from "./relayer.ts";
+import { sleep } from "./sleep.ts";
 import type { Store } from "./store.ts";
+import type { Feed, FeedEvent } from "./stream.ts";
 
 type Deps = {
   client: PublicClient;
@@ -22,11 +28,56 @@ type Deps = {
   relayer: Relayer;
   oracle: Address;
   store: Store;
+  feed: Feed;
   /** The test loop's key for claims with no login. Undefined turns that way in off. */
   testKey?: string;
+  /** The secret the QuickNode Stream sends with each delivery. Undefined refuses every delivery. */
+  streamSecret?: string;
 };
 
 class BadRequest extends Error {}
+
+/** An open event stream gets a line this often when nothing happens, so no proxy closes it as idle. */
+const EVENTS_PING_MS = 20_000;
+const MAX_DELIVERY_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Server-sent events: each vault event that `wanted` accepts, the moment it reaches the feed. The page
+ * reads the promo again when one arrives, so an event that is missed while the connection is down costs
+ * nothing: the page also reads the promo when the connection comes back.
+ */
+function eventStream(c: Context, feed: Feed, wanted: (event: FeedEvent) => boolean): Response {
+  // Tells a proxy in front of the keeper to pass each line on as it is written.
+  c.header("X-Accel-Buffering", "no");
+  return streamSSE(c, async (stream) => {
+    const queue: FeedEvent[] = [];
+    let wake: (() => void) | null = null;
+    let open = true;
+    const stop = feed.subscribe((event) => {
+      if (!wanted(event)) return;
+      queue.push(event);
+      wake?.();
+    });
+    stream.onAbort(() => {
+      open = false;
+      wake?.();
+    });
+    try {
+      // The first line tells the page it is connected, and to come back 2 seconds after a drop.
+      await stream.writeSSE({ event: "ready", data: "{}", retry: 2000 });
+      while (open) {
+        for (let event = queue.shift(); event !== undefined; event = queue.shift()) {
+          await stream.writeSSE({ event: "vault", id: event.id, data: JSON.stringify(event) });
+        }
+        await sleep(EVENTS_PING_MS, undefined, (w) => { wake = w; });
+        wake = null;
+        if (open && queue.length === 0) await stream.write(": still here\n\n");
+      }
+    } finally {
+      stop();
+    }
+  });
+}
 
 const CLAIM_STATUS: Partial<Record<ClaimRefusal["code"], 401 | 403 | 409 | 502>> = {
   login: 401,
@@ -100,7 +151,37 @@ export function makeApp(d: Deps): Hono {
       block: Number(block),
       // The commit this build was made from, when the host says (Railway does). Null on a laptop.
       commit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? null,
+      // The feed: what the QuickNode Stream has delivered, and how far the keeper's own read has come.
+      stream: { ...d.feed.status(), webhook: d.streamSecret !== undefined },
     });
+  });
+
+  // The QuickNode Stream's webhook. A delivery is the vault's logs of one block, as `stream/filter.js`
+  // returns them. Only a request that carries the Stream's secret is read.
+  app.post("/stream", bodyLimit({ maxSize: MAX_DELIVERY_BYTES }), async (c) => {
+    if (d.streamSecret === undefined || !sameSecret(c.req.header("x-stream-secret"), d.streamSecret)) {
+      return c.json({ error: { code: "unauthorized", message: "This is the Stream's webhook." } }, 401);
+    }
+    let body: unknown;
+    try {
+      const bytes = Buffer.from(await c.req.arrayBuffer());
+      const gzipped = /gzip/i.test(c.req.header("content-encoding") ?? "");
+      body = JSON.parse((gzipped ? gunzipSync(bytes, { maxOutputLength: MAX_DELIVERY_BYTES * 8 }) : bytes).toString("utf8"));
+    } catch {
+      throw new BadRequest("the delivery is not JSON");
+    }
+    // A delivery with no vault event in it (QuickNode's test message) is answered the same way: 200.
+    return c.json({ ok: true, ...d.feed.deliver(body) });
+  });
+
+  // Every vault event as it happens, as server-sent events. `/promos/:id/events` is one promo's.
+  app.get("/events", (c) => eventStream(c, d.feed, () => true));
+
+  // The newest vault events of every kind, oldest first, and the Stream's record.
+  app.get("/feed", (c) => {
+    const limit = Number(c.req.query("limit") ?? 100);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new BadRequest("limit must be 1 to 1000");
+    return c.json({ stream: d.feed.status(), events: d.feed.recent(limit) });
   });
 
   // Each RPC endpoint on its own, in the order the keeper tries them. The URLs stay private.
@@ -166,9 +247,17 @@ export function makeApp(d: Deps): Hono {
     return c.json(await d.relayer.registerClaim(promoId, body.customer, body.userToken));
   });
 
+  // One promo's events as they happen, as server-sent events. A page that shows a promo keeps this open
+  // and reads the promo again on every event.
+  app.get("/promos/:id/events", (c) => {
+    const id = c.req.param("id");
+    if (!/^\d+$/.test(id)) throw new BadRequest("promo id must be a whole number");
+    return eventStream(c, d.feed, (event) => event.promoId === id);
+  });
+
   // A promo as the chain has it, with the plain names behind its two hashes, what the merchant said is
-  // free, and the transactions the keeper sent for it. With `?customer=0x...` it adds that customer's
-  // place in line and whether they have been paid.
+  // free, its events on the vault, and the transactions the keeper sent for it. With `?customer=0x...`
+  // it adds that customer's place in line and whether they have been paid.
   app.get("/promos/:id", async (c) => {
     const raw = c.req.param("id");
     if (!/^\d+$/.test(raw)) throw new BadRequest("promo id must be a whole number");
@@ -191,6 +280,7 @@ export function makeApp(d: Deps): Hono {
       }
     }
     const label = promoLabels[raw];
+    const stream = d.feed.status();
 
     const who = c.req.query("customer");
     let customer = null;
@@ -245,6 +335,10 @@ export function makeApp(d: Deps): Hono {
       hedgeMode: p.hedgeMode,
       /** What the keeper and the relayer sent for this promo, oldest first. */
       txs: d.store.data.txs.filter((t) => t.promoId === raw).map(({ at, action, hash }) => ({ at, action, hash })),
+      /** The promo's events on the vault, oldest first, each with how it reached the keeper (`via`). */
+      events: d.feed.forPromo(raw),
+      /** The QuickNode Stream's record: deliveries that carried a vault event, and when the last one came. */
+      stream: { deliveries: stream.deliveries, lastDeliveryAt: stream.lastDeliveryAt },
       customer,
     });
   });

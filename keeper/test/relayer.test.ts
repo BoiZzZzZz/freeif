@@ -8,6 +8,7 @@ import type { CircleUser } from "../src/circle.ts";
 import { ClaimRefusal, Relayer, type ClaimRefusalCode } from "../src/relayer.ts";
 import { makeApp } from "../src/server.ts";
 import { Store } from "../src/store.ts";
+import { Feed } from "../src/stream.ts";
 
 const VAULT: Address = "0x68a00243927f250dBcD9160b5d06623b62B2e06d";
 const RELAYER: Address = "0xa03aF58DF0B042fFA9342F178bb37F8a9f1E3286";
@@ -173,7 +174,9 @@ test("registerTestClaim_asksCircleNothing_andIsCountedUnderItsOwnName", async ()
 function route(testKey?: string) {
   const { relayer, state } = setup();
   const unused = {} as never;
-  const app = makeApp({ client: unused, vault: VAULT, pricer: unused, games: unused, relayer, oracle: RELAYER, store: new Store(null), testKey });
+  const store = new Store(null);
+  const feed = new Feed({ store, vault: VAULT });
+  const app = makeApp({ client: unused, vault: VAULT, pricer: unused, games: unused, relayer, oracle: RELAYER, store, feed, testKey });
   const post = async (body: unknown, headers: Record<string, string> = {}) => {
     const res = await app.request("/claims", {
       method: "POST",
