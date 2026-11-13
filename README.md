@@ -17,7 +17,7 @@ Built for the UBC Hackathon 2026 (DeFi track). Work in progress: this README gro
 | | |
 |---|---|
 | Vault | [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d) on Arc testnet (chain 5042002), verified |
-| App | [`https://freeif-free-if.vercel.app`](https://freeif-free-if.vercel.app): [`/merchant`](https://freeif-free-if.vercel.app/merchant) sets up a promo, `/claim/[id]` covers a customer, `/promo/[id]` is its status page. Add `?mechanics=1` to see where each number comes from. Details in [`web/README.md`](web/README.md) |
+| App | [`https://freeif.app`](https://freeif.app): [`/merchant`](https://freeif.app/merchant) sets up a promo, `/claim/[id]` covers a customer, `/promo/[id]` is its status page. Add `?mechanics=1` to see where each number comes from. Details in [`web/README.md`](web/README.md) |
 | Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
 | First payout | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
 
