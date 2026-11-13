@@ -15,7 +15,8 @@
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "abi": "node scripts/gen-abi.mjs",
-    "e2e": "node scripts/e2e.ts"
+    "e2e": "node scripts/e2e.ts",
+    "ship": "node scripts/deploy.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.7",

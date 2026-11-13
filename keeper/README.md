@@ -19,6 +19,7 @@ pnpm start        # the API on port 8787 and the loop
 pnpm test         # unit tests, plus three that read the deployed vault (skipped without VAULT_ADDRESS)
 pnpm typecheck
 pnpm abi          # rewrite src/abi.ts after a contract change (run `forge build` in ../contracts first)
+pnpm ship         # deploy the pushed commit to Railway and wait for it
 ```
 
 Settings come from the environment. On a developer machine they are read from `~/.freeif/secrets.env` (or the file named in `FREEIF_SECRETS`), which is never inside this repo; variables already in the environment win.
@@ -68,7 +69,9 @@ It needs `TEST_MERCHANT_PK` and `TEST_CUSTOMER_ADDRESSES` in the environment, a 
 
 ## Hosting
 
-The keeper runs on Railway at `https://freeif-production.up.railway.app`, built from `Dockerfile` with `keeper/` as the service's root folder, and redeployed on every push to `main`. Its file is on a volume mounted at `/data` (`KEEPER_DATA_DIR=/data`), so a redeploy keeps the record of which emails have claimed. The health check is `GET /health`.
+The keeper runs on Railway at `https://freeif-production.up.railway.app`, built from `Dockerfile` with `keeper/` as the service's root folder. Its file is on a volume mounted at `/data` (`KEEPER_DATA_DIR=/data`), so a redeploy keeps the record of which emails have claimed. The health check is `GET /health`, which also names the commit that is live.
+
+To deploy: push to `main`, then `pnpm ship`. It asks Railway to build the pushed commit and waits until the new build passes its health check (about a minute); if the build fails, the previous one keeps serving. It needs `RAILWAY_API_TOKEN`, `RAILWAY_SERVICE_ID` and `RAILWAY_ENVIRONMENT_ID`.
 
 Run one keeper per vault. A second one with the same keys does no harm to the vault (every step is checked on chain first), but the two compete for transaction nonces. To test against the hosted keeper: `KEEPER_URL=https://freeif-production.up.railway.app pnpm e2e`.
 
