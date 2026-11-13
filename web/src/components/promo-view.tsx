@@ -12,7 +12,7 @@ import { explorerAddress, explorerTx, KEEPER_URL } from "@/lib/config";
 import { dayTime, timeOf, usd } from "@/lib/format";
 import type { Promo } from "@/lib/keeper";
 import { KEYS, NO_PROMOS, useLocal, type MyPromo } from "@/lib/local";
-import { feedLines, promoTitle, statusLine, takingCustomers } from "@/lib/promo";
+import { feedLines, promoTitle, statusLine, takingCustomers, timeline, type TimelineStep } from "@/lib/promo";
 import { useNow } from "@/lib/use-now";
 import { useOdds } from "@/lib/use-odds";
 import { usePromo } from "@/lib/use-promo";
@@ -59,6 +59,7 @@ export function PromoView({ id }: { id: string }) {
   const status = statusLine(promo, now, merchant);
   const taking = takingCustomers(promo, now) === "yes";
   const feed = feedLines(promo, merchant);
+  const steps = timeline(promo, merchant);
   // How the newest event reached the keeper: the QuickNode Stream's delivery, or its own read of the chain.
   const transport = feed[0]?.via === "stream" ? "QuickNode Stream" : "RPC";
   const started = promo.events.some((e) => e.event === "PromoCreated");
@@ -98,6 +99,7 @@ export function PromoView({ id }: { id: string }) {
       </dl>
 
       {merchant && taking && <CounterKit id={id} promo={promo} />}
+      {steps && <Timeline steps={steps} />}
       {!merchant && taking && (
         <Link
           href={`/claim/${id}`}
@@ -168,6 +170,32 @@ function Number({ value, label }: { value: string; label: string }) {
       <dd className="num text-[20px] font-semibold leading-7">{value}</dd>
       <dt className="label mt-1">{label}</dt>
     </div>
+  );
+}
+
+/** Once there is a result: the promo's three steps, each with the time it happened. */
+function Timeline({ steps }: { steps: TimelineStep[] }) {
+  return (
+    <section className="mt-8">
+      <h2 className="label mb-2">Timeline</h2>
+      <ol className="rounded-[10px] border border-line bg-card px-4 py-3">
+        {steps.map((step, i) => {
+          const done = step.at !== null;
+          return (
+            <li key={step.label} className="relative flex items-baseline gap-3 pb-4 last:pb-0">
+              {/* The line down to the next step. */}
+              {i < steps.length - 1 && <span className="absolute bottom-0 left-[4.5px] top-[14px] w-px bg-line" aria-hidden />}
+              <span
+                className={`relative mt-[7px] size-2.5 shrink-0 self-start rounded-full ${done ? (step.paid ? "bg-go" : "bg-ink") : "border border-ink/40 bg-card"}`}
+                aria-hidden
+              />
+              <span className={`min-w-0 flex-1 text-[15px] ${done ? "" : "text-ink/60"}`}>{step.label}</span>
+              <span className="num shrink-0 text-[13px] text-ink/60">{done ? dayTime(step.at!) : "Not yet"}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </section>
   );
 }
 

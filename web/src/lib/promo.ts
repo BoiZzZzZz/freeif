@@ -93,6 +93,47 @@ export function statusLine(p: Promo, now: number, merchant: boolean): StatusLine
   }
 }
 
+/** One step of the promo's timeline. `at` is null for a step that has not happened yet. */
+export type TimelineStep = { label: string; at: number | null; paid?: boolean };
+
+/**
+ * The promo's life in three steps, each with its real time (prep/WIREFRAMES.md section 9.1): it started,
+ * the result came in, the customers were paid. Null until there is a result: before that the page shows
+ * the counter code in this place.
+ */
+export function timeline(p: Promo, merchant: boolean): TimelineStep[] | null {
+  if (p.status === "Open") return null;
+  const when = (name: FeedEvent["event"]): number | null => p.events.findLast((e) => e.event === name)?.at ?? null;
+  const started: TimelineStep = { label: "Promo started", at: p.events.find((e) => e.event === "PromoCreated")?.at ?? null };
+
+  if (p.status === "Voided") {
+    const at = when("Voided");
+    return [started, { label: "Game cancelled", at }, { label: merchant ? `Your ${usd(p.premiumPaid)} was refunded` : "The shop was refunded", at }];
+  }
+
+  const what = p.outcomeYes ? won(p) : lost(p);
+  const result: TimelineStep = {
+    label: p.status === "Vetoed" ? "The result is being checked" : `Result: ${what[0]!.toLowerCase()}${what.slice(1, -1)}`,
+    at: p.status === "Vetoed" ? null : p.settledAt || when("Settled"),
+  };
+  const confirmed = when("Finalized");
+  let last: TimelineStep;
+  if (p.status === "Vetoed") {
+    last = { label: "Customers paid", at: null };
+  } else if (!p.outcomeYes) {
+    // A "no": the last step is the result becoming final.
+    const at = p.status === "FinalizedNo" ? confirmed : null;
+    last = { label: at === null ? "Confirming the result" : "Result confirmed. Nobody is owed anything.", at };
+  } else if (p.claimCount === 0) {
+    const at = p.status === "PaidOut" ? confirmed : null;
+    last = { label: at === null ? "Confirming the result" : "Nobody was covered, so nobody is owed anything", at };
+  } else {
+    const at = p.status === "PaidOut" ? (when("Paid") ?? confirmed) : null;
+    last = { label: `${customers(p.claimCount)} ${at === null ? (p.claimCount === 1 ? "gets" : "get") : "paid"} ${usd(p.payoutPerClaim)}${p.claimCount === 1 ? "" : " each"}`, at, paid: true };
+  }
+  return [started, result, last];
+}
+
 /** One line of the promo page's feed. */
 export type FeedLine = {
   id: string;
