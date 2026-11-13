@@ -28,7 +28,9 @@ const signed = (amount: bigint): string => `${amount < 0n ? "−" : "+"}${usd(am
 const sharePrice = (basis: bigint, totalShares: bigint): string =>
   totalShares === 0n ? "1.0000" : (Number((basis * 10_000n) / totalShares) / 10_000).toFixed(4);
 const shareCount = (shares: bigint): string => (Number(shares) / 1e6).toLocaleString("en-US", { maximumFractionDigits: 2 });
-const promoName = (p: VaultPromo): string => `${p.item ?? "Promo"} · ${p.condition ?? p.game ?? `promo ${p.promoId}`}`;
+// A promo that pays the business itself (hedge mode) is listed as a cover.
+const promoName = (p: VaultPromo): string =>
+  `${p.hedgeMode ? "Business cover" : (p.item ?? "Promo")} · ${p.condition ?? p.game ?? `promo ${p.promoId}`}`;
 
 /** The vault, read again every 15 seconds and whenever an event on it reaches the keeper. */
 function useVault(): { vault: Vault | null; failed: boolean; reload: () => Promise<void> } {

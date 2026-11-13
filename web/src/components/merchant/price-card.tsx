@@ -11,10 +11,10 @@ import { useNow } from "@/lib/use-now";
 
 const NO_PRICE = "We can't get a live price right now. Try again in a moment.";
 
-function messageFor(err: unknown): string {
+function messageFor(err: unknown, cover: boolean): string {
   if (!(err instanceof KeeperError)) return NO_PRICE;
   if (err.code === "event-started" || err.code === "too-close" || err.code === "market-closed") {
-    return "This game has started. Pick another game.";
+    return cover ? "This day has started. Pick another day." : "This game has started. Pick another game.";
   }
   // Refusals a merchant can act on keep the keeper's own words; the rest are "no live price".
   return err.status === 422 ? err.message : NO_PRICE;
@@ -27,7 +27,7 @@ type Held = { key: string; price: Price | null; error: string | null; at: number
  * price does not ask on every key) and again every 15 seconds. A stale price is never shown: when
  * the keeper cannot give one, the card says so.
  */
-export function usePrice(request: PriceRequest | null, onPrice?: (price: Price) => void) {
+export function usePrice(request: PriceRequest | null, onPrice?: (price: Price) => void, cover = false) {
   const key = request ? JSON.stringify(request) : "";
   const [held, setHeld] = useState<Held | null>(null);
 
@@ -41,7 +41,7 @@ export function usePrice(request: PriceRequest | null, onPrice?: (price: Price) 
           onPrice?.(price);
         },
         (err) => {
-          if (!controller.signal.aborted) setHeld({ key, price: null, error: messageFor(err), at: Date.now() });
+          if (!controller.signal.aborted) setHeld({ key, price: null, error: messageFor(err, cover), at: Date.now() });
         },
       );
     const first = window.setTimeout(load, 250);
@@ -51,7 +51,8 @@ export function usePrice(request: PriceRequest | null, onPrice?: (price: Price) 
       window.clearTimeout(first);
       window.clearInterval(timer);
     };
-    // `onPrice` is left out on purpose: a new function each render must not restart the price.
+    // `onPrice` is left out on purpose: a new function each render must not restart the price. `cover`
+    // changes only together with the request.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
@@ -82,9 +83,11 @@ type CardProps = {
   /** What the merchant is giving away each time, in base units, for the "(12 × $8.00)" note. */
   payout: bigint | null;
   count: number;
+  /** True for a cover: the payout goes to the business itself, so the lines say what it would receive. */
+  cover?: boolean;
 };
 
-export function PriceCard({ price, error, loading, at, payout, count }: CardProps) {
+export function PriceCard({ price, error, loading, at, payout, count, cover = false }: CardProps) {
   const [open, setOpen] = useState(false);
   const mechanics = useMechanics();
   const now = useNow(1000);
@@ -103,28 +106,40 @@ export function PriceCard({ price, error, loading, at, payout, count }: CardProp
           </p>
         )}
         {!error && !price && (
-          <p className="text-[15px] text-ink/60">{loading ? "Getting your price…" : "Pick a team and set a price to see what this costs."}</p>
+          <p className="text-[15px] text-ink/60">
+            {loading
+              ? "Getting your price…"
+              : cover
+                ? "Pick a day and a temperature to see what this costs."
+                : "Pick a team and set a price to see what this costs."}
+          </p>
         )}
         {price && (
           <div className="space-y-2">
             <Line label={`Chance ${price.display.subject ? price.display.condition : "this happens"}`} value={pct(price.breakdown.chance)} />
-            <Line
-              label={
-                <>
-                  Most you could owe{" "}
-                  {payout !== null && (
-                    <span className="num text-ink/60">
-                      ({count} × {usd(payout)})
-                    </span>
-                  )}
-                </>
-              }
-              value={usd(price.breakdown.mostOwed)}
-            />
+            {cover ? (
+              <Line label="You'd receive" value={usd(price.breakdown.mostOwed)} />
+            ) : (
+              <Line
+                label={
+                  <>
+                    Most you could owe{" "}
+                    {payout !== null && (
+                      <span className="num text-ink/60">
+                        ({count} × {usd(payout)})
+                      </span>
+                    )}
+                  </>
+                }
+                value={usd(price.breakdown.mostOwed)}
+              />
+            )}
             <div className="border-t border-line pt-3">
               <Line label="Your cost today" value={usd(price.breakdown.cost)} strong />
             </div>
-            <p className="pt-1 text-[14px] text-ink/60">Includes our {usd(price.breakdown.fee)} fee. This is all you pay, win or lose.</p>
+            <p className="pt-1 text-[14px] text-ink/60">
+              Includes our {usd(price.breakdown.fee)} fee. This is all you pay, {cover ? "whatever happens" : "win or lose"}.
+            </p>
             {mechanics && (
               <p className="num inline-block rounded-full bg-go-tint px-2.5 py-0.5 text-[12px] text-ink">
                 Live price: Gemini Prediction Markets API
@@ -136,12 +151,12 @@ export function PriceCard({ price, error, loading, at, payout, count }: CardProp
           </div>
         )}
       </div>
-      {price && <HowSheet open={open} onClose={() => setOpen(false)} price={price} mechanics={mechanics} />}
+      {price && <HowSheet open={open} onClose={() => setOpen(false)} price={price} mechanics={mechanics} cover={cover} />}
     </section>
   );
 }
 
-function HowSheet({ open, onClose, price, mechanics }: { open: boolean; onClose: () => void; price: Price; mechanics: boolean }) {
+function HowSheet({ open, onClose, price, mechanics, cover }: { open: boolean; onClose: () => void; price: Price; mechanics: boolean; cover: boolean }) {
   const b = price.breakdown;
   const m = price.mechanics;
   const subject = price.display.subject;
@@ -156,11 +171,17 @@ function HowSheet({ open, onClose, price, mechanics }: { open: boolean; onClose:
         </div>
       </div>
       <div className="mt-4 space-y-3 text-[15px]">
-        <p>
-          {subject ? `If ${price.display.condition}` : "If it happens"}, we pay your customers, up to {usd(b.mostOwed)}.{" "}
-          {subject ? `If ${subject.startsWith("the ") ? "they lose" : `${subject} loses`}` : "If it doesn't"}, nobody is owed anything and we
-          keep the {usd(b.cost)}.
-        </p>
+        {cover ? (
+          <p>
+            If it happens, we pay you {usd(b.mostOwed)}. If it doesn&apos;t, nothing is owed and we keep the {usd(b.cost)}.
+          </p>
+        ) : (
+          <p>
+            {subject ? `If ${price.display.condition}` : "If it happens"}, we pay your customers, up to {usd(b.mostOwed)}.{" "}
+            {subject ? `If ${subject.startsWith("the ") ? "they lose" : `${subject} loses`}` : "If it doesn't"}, nobody is owed anything and
+            we keep the {usd(b.cost)}.
+          </p>
+        )}
         <p>
           Where {pct(b.chance)} comes from: live prices on Gemini, where people trade on{" "}
           {subject ? "who wins this game" : "whether this happens"}. The price moves until you pay.

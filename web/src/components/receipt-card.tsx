@@ -37,6 +37,11 @@ export type ReceiptCardProps = {
   customerNumber?: number | null;
   /** When the payout was sent, unix seconds. */
   paidAt?: number | null;
+  /**
+   * True for a cover: the payout goes to the business itself. The card then reads "To Tony's Pizza,
+   * $250.00, if the high in Austin ...", with no kickoff and no customer line.
+   */
+  cover?: boolean;
   onDetails?: () => void;
 };
 
@@ -116,11 +121,13 @@ function Front(p: ReceiptCardProps) {
         </div>
 
         <div className="mt-4 flex items-baseline justify-between gap-4">
-          <span className="min-w-0 truncate text-[22px] font-semibold leading-7">{p.item?.trim() || <Blank width="w-24" />}</span>
+          <span className="min-w-0 truncate text-[22px] font-semibold leading-7">
+            {p.cover ? `To ${p.business?.trim() || "your business"}` : p.item?.trim() || <Blank width="w-24" />}
+          </span>
           <span className="num shrink-0 text-[22px] leading-7">{p.amount ? usd(p.amount) : <Blank width="w-14" />}</span>
         </div>
         <p className="mt-1 text-[13px] font-semibold uppercase tracking-[0.06em]">
-          {p.condition ? `Free if ${p.condition}` : <Blank width="w-40" />}
+          {p.condition ? `${p.cover ? "If" : "Free if"} ${p.condition}` : <Blank width="w-40" />}
         </p>
       </div>
 
@@ -132,11 +139,16 @@ function Front(p: ReceiptCardProps) {
       </div>
 
       <dl className="space-y-1.5 px-5 pb-4">
-        <Row label="Game">{p.game ?? <Blank width="w-32" />}</Row>
-        {(p.startTime || p.state === "preview") && (
+        <Row label={p.cover ? "Day" : "Game"}>{p.game ?? <Blank width="w-32" />}</Row>
+        {!p.cover && (p.startTime || p.state === "preview") && (
           <Row label="Kickoff">{p.startTime ? <span className="num">{dayTime(p.startTime)}</span> : <Blank width="w-24" />}</Row>
         )}
-        {showCustomer && (
+        {p.cover && p.startTime ? (
+          <Row label="Buy by">
+            <span className="num">{dayTime(p.startTime)}</span>
+          </Row>
+        ) : null}
+        {showCustomer && !p.cover && (
           <Row label="Customer">
             <span className="num">
               {p.customerNumber ?? 1} of {p.maxClaims ?? 0}

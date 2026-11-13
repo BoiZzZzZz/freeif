@@ -16,9 +16,13 @@ export type GameTeam = {
   quotable: boolean;
 };
 
-export type Game = { eventTicker: string; game: string; startTime: number; teams: GameTeam[] };
+/**
+ * A game with its two teams. The temperature markets of hedge mode come in the same shape: `game` is
+ * "Austin high on November 14", `startTime` is when that day begins, and each "team" is a range.
+ */
+export type Game = { eventTicker: string; game: string; startTime: number; teams: GameTeam[]; city?: string; day?: string };
 
-export type GamesReply = { leagues: League[]; league: string; games: Game[]; fetchedAt: number };
+export type GamesReply = { leagues?: League[]; league: string; games: Game[]; fetchedAt: number };
 
 /** One window of a 5-minute crypto market, from the keeper's test-loop helper. */
 export type IntervalWindow = {
@@ -244,6 +248,8 @@ export type VaultPromo = {
   marketCloseTime: number;
   settledAt: number;
   outcomeYes: boolean;
+  /** True for a promo that pays the business itself. */
+  hedgeMode?: boolean;
   /** What the vault made on it: the premium less what its customers get. Null until it has a final result. */
   net: string | null;
   /** The promo's hedge. Null when it has none. */
@@ -299,6 +305,9 @@ export class KeeperError extends Error {
   }
 }
 
+/** The keeper could not be reached, or answered with something that is not its own refusal. */
+export const isOutage = (err: unknown): boolean => !(err instanceof KeeperError) || err.status === 0 || err.status >= 500;
+
 const UNREACHABLE = "We can't reach FreeIf right now. Try again in a moment.";
 
 async function call<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
@@ -344,8 +353,11 @@ export const keeper = {
   /** The price of a promo, unsigned. Needs no login. */
   price: (req: PriceRequest, signal?: AbortSignal) => call<Price>(`/price?${query(req)}`, undefined, signal),
 
-  /** A signed quote, good for 90 seconds, for this merchant only. */
-  quote: (req: PriceRequest & { merchant: string; item: string; business: string }) => call<Quoted>("/quote", req),
+  /** Hedge mode's list: daily temperature markets whose day has not begun, in the shape of the games. */
+  weather: (signal?: AbortSignal) => call<GamesReply>("/weather", undefined, signal),
+
+  /** A signed quote, good for 90 seconds, for this merchant only. `hedgeMode` pays the merchant itself. */
+  quote: (req: PriceRequest & { merchant: string; item: string; business: string; hedgeMode?: boolean }) => call<Quoted>("/quote", req),
 
   /** Covers `customer` on a promo. `userToken` is the login: the keeper asks Circle whose it is. */
   claim: (req: { promoId: string; customer: string; userToken: string }) => call<ClaimResult>("/claims", req),

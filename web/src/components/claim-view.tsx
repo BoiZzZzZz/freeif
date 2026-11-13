@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { EmailStep } from "@/components/email-step";
 import { SiteFooter } from "@/components/mechanics";
 import { ReceiptCard, type CardState } from "@/components/receipt-card";
+import { RuleText } from "@/components/rule-text";
 import { Button } from "@/components/ui/button";
 import { Sheet } from "@/components/ui/sheet";
 import { usdcBalance } from "@/lib/balance";
@@ -79,6 +80,20 @@ export function ClaimView({ promoId }: { promoId: string }) {
     return (
       <Frame>
         <div className="h-[260px] animate-pulse rounded-[10px] border border-line bg-card" aria-label="Loading" />
+      </Frame>
+    );
+  }
+
+  // A cover pays the business itself. There is nothing for a customer to scan for.
+  if (promo.hedgeMode) {
+    return (
+      <Frame>
+        <div className="space-y-3 rounded-[10px] border border-line bg-card p-5 text-[16px]">
+          <p>This one pays the business itself, so there is nothing to get covered on here.</p>
+          <Link className="block text-[15px] underline underline-offset-2" href={`/promo/${promoId}`}>
+            See its page ›
+          </Link>
+        </div>
       </Frame>
     );
   }
@@ -169,7 +184,9 @@ export function ClaimView({ promoId }: { promoId: string }) {
           {promo.rule && (
             <div>
               <p className="label mb-1">The rule</p>
-              <p className="text-[14px] text-ink/60">{promo.rule}</p>
+              <p className="text-[14px] text-ink/60">
+                <RuleText text={promo.rule} />
+              </p>
             </div>
           )}
           {covered && wallet.session && <p className="text-ink/60">Covered under {wallet.session.email}.</p>}

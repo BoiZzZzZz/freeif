@@ -7,12 +7,13 @@ import { QRCodeCanvas, QRCodeSVG } from "qrcode.react";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { SiteFooter, useMechanics } from "@/components/mechanics";
 import { OddsChart } from "@/components/odds-chart";
+import { RuleText } from "@/components/rule-text";
 import { Button } from "@/components/ui/button";
 import { explorerAddress, explorerTx, KEEPER_URL } from "@/lib/config";
 import { dayTime, timeOf, usd } from "@/lib/format";
 import type { Promo } from "@/lib/keeper";
 import { KEYS, NO_PROMOS, useLocal, type MyPromo } from "@/lib/local";
-import { feedLines, promoTitle, statusLine, takingCustomers, timeline, type TimelineStep } from "@/lib/promo";
+import { feedLines, statusLine, takingCustomers, timeline, titleOf, type TimelineStep } from "@/lib/promo";
 import { useNow } from "@/lib/use-now";
 import { useOdds } from "@/lib/use-odds";
 import { usePromo } from "@/lib/use-promo";
@@ -57,7 +58,9 @@ export function PromoView({ id }: { id: string }) {
   const created = mine.find((p) => p.id === id);
   const merchant = created !== undefined || wallet.session?.address.toLowerCase() === promo.merchant.toLowerCase();
   const status = statusLine(promo, now, merchant);
-  const taking = takingCustomers(promo, now) === "yes";
+  // A cover pays the business itself: nobody is covered at the counter, so there is no code to scan.
+  const cover = promo.hedgeMode;
+  const taking = !cover && takingCustomers(promo, now) === "yes";
   const feed = feedLines(promo, merchant);
   const steps = timeline(promo, merchant);
   // How the newest event reached the keeper: the QuickNode Stream's delivery, or its own read of the chain.
@@ -84,19 +87,27 @@ export function PromoView({ id }: { id: string }) {
           {mechanics ? `Live · ${transport}` : "Live"}
         </span>
       </div>
-      <h1 className="mt-2 text-[26px] font-semibold leading-tight tracking-tight">{promoTitle(promo.item, promo.condition)}</h1>
+      <h1 className="mt-2 text-[26px] font-semibold leading-tight tracking-tight">{titleOf(promo)}</h1>
       <p className="mt-1 text-[15px] text-ink/60">
         {promo.business ? `${promo.business} · ` : ""}
         {promo.game ?? promo.eventTitle ?? "Event"}
-        {promo.eventStartTime ? <span className="num"> · {dayTime(promo.eventStartTime)}</span> : null}
+        {/* A game has a kickoff. A day's high has a date, which is already in its name. */}
+        {!cover && promo.eventStartTime ? <span className="num"> · {dayTime(promo.eventStartTime)}</span> : null}
       </p>
       <p className="mt-4 text-[17px]">{status.sentence}</p>
 
-      <dl className="mt-6 grid grid-cols-3 gap-3 border-y border-line py-4">
-        <Number value={`${promo.claimCount} of ${promo.maxClaims}`} label="Customers covered" />
-        <Number value={usd(promo.premiumPaid)} label={merchant ? "You paid" : "The shop paid"} />
-        <Number value={usd(BigInt(promo.payoutPerClaim) * BigInt(promo.claimCount))} label={`Customers get if ${condition}`} />
-      </dl>
+      {cover ? (
+        <dl className="mt-6 grid grid-cols-2 gap-3 border-y border-line py-4">
+          <Number value={usd(promo.payoutPerClaim)} label={`${merchant ? "You get" : "Paid out"} if it happens`} />
+          <Number value={usd(promo.premiumPaid)} label={merchant ? "You paid" : "The business paid"} />
+        </dl>
+      ) : (
+        <dl className="mt-6 grid grid-cols-3 gap-3 border-y border-line py-4">
+          <Number value={`${promo.claimCount} of ${promo.maxClaims}`} label="Customers covered" />
+          <Number value={usd(promo.premiumPaid)} label={merchant ? "You paid" : "The shop paid"} />
+          <Number value={usd(BigInt(promo.payoutPerClaim) * BigInt(promo.claimCount))} label={`Customers get if ${condition}`} />
+        </dl>
+      )}
 
       {merchant && taking && <CounterKit id={id} promo={promo} />}
       {steps && <Timeline steps={steps} />}
@@ -136,7 +147,7 @@ export function PromoView({ id }: { id: string }) {
             <li className="flex items-baseline gap-4 px-4 py-2.5 text-[15px]">
               <span className="num w-[72px] shrink-0 text-[13px] text-ink/60">{created ? timeOf(created.at) : ""}</span>
               <span className="min-w-0 flex-1">
-                Promo started. {merchant ? "You" : "The shop"} paid {usd(promo.premiumPaid)}.
+                {cover ? "Cover" : "Promo"} started. {merchant ? "You" : cover ? "The business" : "The shop"} paid {usd(promo.premiumPaid)}.
               </span>
               {mechanics && created?.tx && (
                 <a className="num shrink-0 text-[12px] underline underline-offset-2" href={explorerTx(created.tx)} target="_blank" rel="noreferrer">
@@ -273,7 +284,7 @@ function Proof({ promo, open }: { promo: Promo; open: boolean }) {
       <summary className="cursor-pointer px-4 py-3 text-[15px] font-medium">Proof</summary>
       <dl className="space-y-4 border-t border-line px-4 py-4 text-[14px]">
         <ProofRow label="The rule">
-          {promo.rule ?? "Gemini's rule for this result is on the event."}
+          {promo.rule ? <RuleText text={promo.rule} /> : "Gemini's rule for this result is on the event."}
           {eventUrl && (
             <>
               {" "}
@@ -286,7 +297,9 @@ function Proof({ promo, open }: { promo: Promo; open: boolean }) {
         <ProofRow label="The result">
           {promo.settledAt > 0
             ? `Gemini settled this result "${promo.outcomeYes ? "yes" : "no"}". Posted to Arc ${dayTime(promo.settledAt)}.`
-            : "Not in yet. The keeper posts Gemini's result once the promo stops taking customers."}
+            : promo.hedgeMode
+              ? "Not in yet. The keeper posts Gemini's result once Gemini has it."
+              : "Not in yet. The keeper posts Gemini's result once the promo stops taking customers."}
           {settle && (
             <>
               {" "}
@@ -309,8 +322,7 @@ function Proof({ promo, open }: { promo: Promo; open: boolean }) {
             <span className="num mt-2 block space-y-1 text-[12px]">
               {txs.map((t) => (
                 <a key={t.hash} className="block truncate underline underline-offset-2" href={explorerTx(t.hash)} target="_blank" rel="noreferrer">
-                  {t.names[0]}
-                  {t.names.length > 1 ? ` ×${t.names.length}` : ""} · {t.hash}
+                  {eventNames(t.names)} · {t.hash}
                 </a>
               ))}
             </span>
@@ -341,6 +353,15 @@ function Proof({ promo, open }: { promo: Promo; open: boolean }) {
       </dl>
     </details>
   );
+}
+
+/** The events of one transaction: "Paid ×3" for three of a kind, "PromoCreated + ClaimRegistered" for two kinds. */
+function eventNames(names: string[]): string {
+  const kinds = [...new Set(names)];
+  return kinds.map((kind) => {
+    const n = names.filter((name) => name === kind).length;
+    return n > 1 ? `${kind} ×${n}` : kind;
+  }).join(" + ");
 }
 
 function ProofRow({ label, children }: { label: string; children: React.ReactNode }) {

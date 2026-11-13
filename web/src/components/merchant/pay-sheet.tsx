@@ -18,6 +18,7 @@ import { FEE_BUFFER } from "@/lib/config";
 import { pct, usd } from "@/lib/format";
 import { keeper, KeeperError, type PriceRequest, type Quoted } from "@/lib/keeper";
 import { KEYS, NO_PROMOS, readLocal, saveLocal, useLocal, type MyPromo } from "@/lib/local";
+import { coverTitle } from "@/lib/promo";
 import { useWallet, WalletError, type Words } from "@/lib/wallet";
 
 /** What the merchant asked for when they tapped Pay. Fixed for the life of the sheet. */
@@ -27,6 +28,11 @@ export type Order = {
   item: string;
   /** "Wings are free if the Lions win", for Circle's payment screen. */
   title: string;
+  /**
+   * Set when the business itself gets paid (a cover): what has to happen. The headline is then made here,
+   * "$250.00 to Tony's Pizza if ...", because the business's name may only be given inside this sheet.
+   */
+  cover?: { condition: string };
   /** The cost and the chance the form was showing, to tell the merchant if either has moved. */
   shownCost: string;
   shownChance: number;
@@ -50,17 +56,18 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  * "You are signing:", so the sentence is written to follow it, and the payment screen shows a
  * shortened address under "To" and cuts a long "From" value in the middle.
  */
-function words(cost: string, title: string): Words {
+function words(cost: string, title: string, cover: boolean): Words {
+  const thing = cover ? "cover" : "promotion";
   return {
     common: { sign: "Continue", confirm: "Pay" },
     signatureRequest: {
-      title: "Confirm your promotion",
+      title: `Confirm your ${thing}`,
       contractName: "FreeIf",
       contractUrl: "https://freeif.app",
-      description: `Step 1 of 2. A payment of ${cost} from your FreeIf balance for this promotion. Nothing else is charged.`,
+      description: `Step 1 of 2. A payment of ${cost} from your FreeIf balance for this ${thing}. Nothing else is charged.`,
     },
     contractInteraction: {
-      title: "Start your promotion",
+      title: `Start your ${thing}`,
       subtitle: title,
       mainCurrency: { amount: cost.replace("$", ""), symbol: "USD" },
       fromLabel: "From",
@@ -71,7 +78,7 @@ function words(cost: string, title: string): Words {
       networkFeeTip: "About one cent",
       totalLabel: "Total",
       total: [cost],
-      dataDetails: { dataDetailsLabel: "Details", callData: { callDataLabel: "Reference", data: "Promotion payment" } },
+      dataDetails: { dataDetailsLabel: "Details", callData: { callDataLabel: "Reference", data: cover ? "Cover payment" : "Promotion payment" } },
     },
   };
 }
@@ -84,6 +91,9 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
   const [phase, setPhase] = useState<Phase>({ name: "checking" });
   const address = session?.address ?? null;
   const ready = address !== null && business !== "";
+  const cover = order.cover !== undefined;
+  const title = order.cover ? coverTitle(order.request.payoutPerClaim, business, order.cover.condition) : order.title;
+  const thing = cover ? "cover" : "promo";
 
   /** The balance, then a fresh signed price. Ends in "short", "confirm" or "error". */
   const prepare = useCallback(
@@ -96,7 +106,7 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
           setPhase({ name: "short", balance, cost: shown });
           return;
         }
-        const quoted = await keeper.quote({ ...order.request, merchant: address, item: order.item, business });
+        const quoted = await keeper.quote({ ...order.request, merchant: address, item: order.item, business, hedgeMode: cover });
         const cost = BigInt(quoted.quote.premium);
         if (balance < cost + FEE_BUFFER) setPhase({ name: "short", balance, cost });
         else {
@@ -109,7 +119,7 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
         setPhase({ name: "error", message });
       }
     },
-    [address, business, order],
+    [address, business, order, cover],
   );
 
   // Once the merchant is logged in and the shop has a name, the sheet moves on by itself.
@@ -140,7 +150,7 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
 
   async function pay(quoted: Quoted) {
     const cost = usd(quoted.quote.premium);
-    const screens = words(cost, order.title);
+    const screens = words(cost, title, cover);
     setPhase({ name: "paying", line: "Paying" });
     try {
       const permit = await wallet.call<{ challengeId: string; deadline: number }>("permit", { value: quoted.quote.premium });
@@ -155,14 +165,14 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
       });
       await wallet.confirm(send.challengeId, screens);
 
-      setPhase({ name: "paying", line: "Starting your promo" });
+      setPhase({ name: "paying", line: `Starting your ${thing}` });
       for (let i = 0; i < 60; i++) {
         const tx = await wallet.call<TxState>("tx", { challengeId: send.challengeId });
         if (tx.state === "failed") throw new WalletError("failed", tx.message ?? NOT_CHARGED);
         if (tx.state === "done" && tx.promoId) {
           const mine: MyPromo = { id: tx.promoId, tx: tx.txHash ?? "", at: Math.floor(Date.now() / 1000) };
           saveLocal(KEYS.promos, [mine, ...readLocal<MyPromo[]>(KEYS.promos, NO_PROMOS)].slice(0, 50));
-          setPhase({ name: "paying", line: "Promo is live" });
+          setPhase({ name: "paying", line: cover ? "You're covered" : "Promo is live" });
           router.push(`/promo/${tx.promoId}`);
           return;
         }
@@ -186,22 +196,22 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
 
   const busy = phase.name === "paying";
   return (
-    <Sheet open onClose={busy ? () => undefined : onClose} title={busy ? "Starting your promo" : "Pay and start the promo"}>
+    <Sheet open onClose={busy ? () => undefined : onClose} title={busy ? `Starting your ${thing}` : `Pay and start the ${thing}`}>
       {!session ? (
         <div className="space-y-3">
           <p className="text-[15px]">Enter your email. We&apos;ll send a 6-digit code.</p>
           <EmailStep cta="Continue" hint="No password. Your promos are kept under this email." onDone={() => undefined} />
         </div>
       ) : business === "" ? (
-        <BusinessStep />
+        <BusinessStep cover={cover} />
       ) : (
-        <Steps phase={phase} order={order} address={session.address} onPay={pay} onAgain={() => again()} onClose={onClose} />
+        <Steps phase={phase} order={order} title={title} address={session.address} onPay={pay} onAgain={() => again()} onClose={onClose} />
       )}
     </Sheet>
   );
 }
 
-function BusinessStep() {
+function BusinessStep({ cover }: { cover: boolean }) {
   const [name, setName] = useState("");
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -209,7 +219,9 @@ function BusinessStep() {
   }
   return (
     <form onSubmit={submit} className="space-y-3">
-      <p className="text-[15px]">What&apos;s your place called? Your customers see this on their card.</p>
+      <p className="text-[15px]">
+        What&apos;s your place called? {cover ? "It goes on your cover." : "Your customers see this on their card."}
+      </p>
       <Input autoFocus maxLength={40} placeholder="Tony's Pizza" aria-label="Your place's name" value={name} onChange={(e) => setName(e.target.value)} />
       <Button type="submit" disabled={name.trim() === ""}>
         Continue
@@ -221,13 +233,16 @@ function BusinessStep() {
 type StepsProps = {
   phase: Phase;
   order: Order;
+  /** The headline: what is free, or what the business gets. */
+  title: string;
   address: string;
   onPay: (quoted: Quoted) => void;
   onAgain: () => void;
   onClose: () => void;
 };
 
-function Steps({ phase, order, address, onPay, onAgain, onClose }: StepsProps) {
+function Steps({ phase, order, title, address, onPay, onAgain, onClose }: StepsProps) {
+  const cover = order.cover !== undefined;
   if (phase.name === "checking") {
     return (
       <div className="space-y-2">
@@ -237,7 +252,9 @@ function Steps({ phase, order, address, onPay, onAgain, onClose }: StepsProps) {
     );
   }
 
-  if (phase.name === "short") return <AddMoney balance={phase.balance} cost={phase.cost} address={address} onAgain={onAgain} />;
+  if (phase.name === "short") {
+    return <AddMoney balance={phase.balance} cost={phase.cost} address={address} thing={cover ? "cover" : "promo"} onAgain={onAgain} />;
+  }
 
   if (phase.name === "confirm") {
     const { quoted, note, seconds } = phase;
@@ -247,7 +264,7 @@ function Steps({ phase, order, address, onPay, onAgain, onClose }: StepsProps) {
     return (
       <div className="space-y-4">
         {note && <p className="text-[15px]">{note}</p>}
-        <p className="text-[17px] font-medium">{order.title}</p>
+        <p className="text-[17px] font-medium">{title}</p>
         {moved ? (
           <p className="text-[15px]">
             {chanceMoved
@@ -274,7 +291,7 @@ function Steps({ phase, order, address, onPay, onAgain, onClose }: StepsProps) {
           </Button>
         )}
         <p className="text-[14px] text-ink/60">
-          This is all you pay, win or lose. You&apos;ll confirm it on the next two screens.
+          This is all you pay, {cover ? "whatever happens" : "win or lose"}. You&apos;ll confirm it on the next two screens.
         </p>
       </div>
     );
@@ -299,14 +316,14 @@ function Steps({ phase, order, address, onPay, onAgain, onClose }: StepsProps) {
   );
 }
 
-function AddMoney({ balance, cost, address, onAgain }: { balance: bigint; cost: bigint; address: string; onAgain: () => void }) {
+function AddMoney({ balance, cost, address, thing, onAgain }: { balance: bigint; cost: bigint; address: string; thing: string; onAgain: () => void }) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const missing = cost + FEE_BUFFER - balance;
   return (
     <div className="space-y-4">
       <p className="text-[15px]">
-        Your balance is <span className="num">{usd(balance)}</span>. Add <span className="num">{usd(missing)}</span> to start this promo.
+        Your balance is <span className="num">{usd(balance)}</span>. Add <span className="num">{usd(missing)}</span> to start this {thing}.
       </p>
       {!open ? (
         <Button onClick={() => setOpen(true)}>Add money</Button>

@@ -1,5 +1,6 @@
 // Checks the server side of Pay against Arc and the hosted keeper, with the test merchant's plain key
-// standing in for the Circle wallet. Nothing is broadcast: the promo call is only simulated.
+// standing in for the Circle wallet, once for a promo and once for a cover (the business gets paid).
+// Nothing is broadcast: the promo call is only simulated.
 // It needs TEST_MERCHANT_PK in the secrets file outside the repo. Run: pnpm check:pay
 import { hashTypedData, recoverTypedDataAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -13,10 +14,10 @@ async function main() {
   const account = privateKeyToAccount(env("TEST_MERCHANT_PK") as `0x${string}`);
   console.log("merchant", account.address, "balance", (await usdcBalance(account.address)).toString());
 
-  // A real game from the keeper's list, a small promo.
+  // A real game from the keeper's list, a small promo on its less likely team: the test merchant holds little.
   const { games } = await keeper.games("nba");
   const game = games.find((g) => g.teams.some((t) => t.quotable))!;
-  const team = game.teams.find((t) => t.quotable)!;
+  const team = game.teams.filter((t) => t.quotable).sort((a, b) => (a.chance ?? 1) - (b.chance ?? 1))[0]!;
   const request = {
     eventTicker: game.eventTicker,
     instrumentSymbol: team.instrumentSymbol,
@@ -75,6 +76,41 @@ async function main() {
   await refused(
     "an expired quote",
     promoCall(account.address, { ...quoted.quote, expiry: 1 }, quoted.signature, permitSignature, deadline),
+  );
+
+  // The same path for a cover: one payout to the business itself, on a daily temperature market.
+  const { games: days } = await keeper.weather();
+  const day = days.find((d) => d.teams.some((t) => t.quotable));
+  if (!day) {
+    console.log("cover: no day is open right now (tomorrow's opens each morning); not checked");
+    return;
+  }
+  const range = day.teams.find((t) => t.quotable)!;
+  const cover = await keeper.quote({
+    eventTicker: day.eventTicker,
+    instrumentSymbol: range.instrumentSymbol,
+    payoutPerClaim: "1000000",
+    maxClaims: 1,
+    claimDeadline: "start",
+    merchant: account.address,
+    item: "",
+    business: "Web check (not created)",
+    hedgeMode: true,
+  });
+  console.log("cover", day.game, "|", range.condition, "| chance", cover.breakdown.chance, "| cost", cover.quote.premium, "| hedgeMode", cover.quote.hedgeMode);
+  const coverPermit = await permitTypedData(account.address, cover.quote.premium);
+  const coverSig = await account.signTypedData({
+    domain: coverPermit.typed.domain,
+    types: { Permit: coverPermit.typed.types.Permit },
+    primaryType: "Permit",
+    message: { ...message, value: BigInt(coverPermit.typed.message.value), deadline: BigInt(coverPermit.typed.message.deadline) },
+  });
+  const coverCall = await promoCall(account.address, cover.quote, cover.signature, coverSig, coverPermit.deadline);
+  console.log("OK: the cover's call would succeed. calldata bytes", (coverCall.callData.length - 2) / 2);
+  // The pricer signed "the business gets paid": the same quote sent as a customer promo is not that quote.
+  await refused(
+    "a cover's quote sent as a customer promo",
+    promoCall(account.address, { ...cover.quote, hedgeMode: false }, cover.signature, coverSig, coverPermit.deadline),
   );
 }
 

@@ -4,7 +4,7 @@ The FreeIf app: Next.js 16 (App Router), React 19, Tailwind 4, viem, `qrcode.rea
 
 | Page | Who it is for |
 |---|---|
-| `/merchant` | A shop owner sets up a promo: a game and a team, what is free, how many customers, the live cost, Pay |
+| `/merchant` | A shop owner sets up a promo: a game and a team, what is free, how many customers, the live cost, Pay. The switch "My business gets paid" turns the same form into a cover: a day and a temperature range, an amount, the live cost, Pay (below) |
 | `/claim/[promoId]` | A customer at the counter scans the code, types an email and a 6-digit code, and is covered |
 | `/promo/[id]` | The merchant's dashboard and the public status page: one status sentence, three numbers, the counter code (replaced by a three-step timeline with real times once there is a result), a live feed, a chart of how the chance has moved since the promo started, proof |
 | `/promo/[id]/print` | The counter sign with the code, printed from the browser |
@@ -29,6 +29,17 @@ Merchant and customer screens never say prediction market, USDC, wallet or gas. 
 | `POST /api/wallet/tx` | Where that transaction is, and the promo's id once it is in a block |
 
 Paying for a promo is one transaction from the merchant's account: the account signs a permit for exactly the cost, and `createPromoWithPermit` spends it. No standing approval is left. The permit and the call are built on the server (`src/lib/server/promo-call.ts`), so these routes cannot be used to have an account sign or send anything else.
+
+## A cover: the business gets paid
+
+A promo pays a shop's customers. The same contract can pay the shop: one payout, to the account that bought it, if a result happens. The vault calls that hedge mode; the form calls it "My business gets paid", and the pages call the thing a cover. `/merchant?cover=1` opens the form on it.
+
+- **What can be covered.** Gemini's daily high-temperature markets (`GET /weather` on the keeper): a city, a day, and a button per two-degree range with its chance. A food truck in Austin that loses a cold Saturday picks "66°F or below". A range with no two-sided price on Gemini cannot be picked.
+- **Until when.** A day can be bought until it begins. From then on its high is being measured.
+- **How much.** One field: what the business gets if it happens. The price card shows the chance, "You'd receive" and the cost. When the vault cannot cover the amount, the form says how much it can ("We can cover up to $11.86 on this right now."), and an amount nobody has typed yet comes down to that by itself.
+- **Pay** is the same two screens and the same one transaction as a promo. The quote says `hedgeMode`, the vault registers the buyer as the one to be paid, and there is no code to scan: `/claim/[id]` for a cover says so.
+- **Its page** (`/promo/[id]`) says "$2.00 to Test Tacos if the high in Austin on November 14 is 66°F or below", what was paid, the chart, and after the result a timeline that ends "You were paid $2.00". Gemini settles a day's high the next morning (about 11:00 UTC on the days checked), and the keeper posts the result and pays within a minute of it.
+- On `/lp` a cover is listed as "Business cover", with its lock and its hedge order like any promo.
 
 ## The vault page
 
@@ -60,7 +71,7 @@ Settings:
 
 On Vercel the two Circle values are project variables. On a developer machine they are read from `~/.freeif/secrets.env` (or the file named in `FREEIF_SECRETS`), the same file the keeper reads; nothing secret is kept in this folder. The vault's address is not a setting: the server asks the keeper's `/health` for it.
 
-`pnpm check:pay` plays the merchant with a plain test key (`TEST_MERCHANT_PK` in the secrets file) in place of the Circle wallet: a signed quote from the keeper, the permit, and the promo call, simulated on Arc. It also checks that a short permit, an altered quote and an expired quote are refused.
+`pnpm check:pay` plays the merchant with a plain test key (`TEST_MERCHANT_PK` in the secrets file) in place of the Circle wallet: a signed quote from the keeper, the permit, and the promo call, simulated on Arc, once for a promo on a game and once for a cover on a temperature market. It also checks that a short permit, an altered quote, an expired quote and a cover's quote sent as a customer promo are refused.
 
 ## Layout
 
@@ -68,7 +79,7 @@ On Vercel the two Circle values are project variables. On a developer machine th
 |---|---|
 | `src/app/` | The pages and the `/api/wallet` routes |
 | `src/components/receipt-card.tsx` | The ticket: one component with a state, on every page |
-| `src/components/merchant/` | The game picker, the price card and the Pay sheet |
+| `src/components/merchant/` | The form, the game picker, the picker for a day and a temperature (a cover), the price card and the Pay sheet |
 | `src/components/claim-view.tsx`, `promo-view.tsx`, `print-view.tsx` | The three promo pages |
 | `src/components/lp-view.tsx`, `src/lib/injected.ts` | The vault page, and the browser wallet it uses |
 | `src/lib/wallet.tsx` | The login and Circle's challenges, as a React provider |

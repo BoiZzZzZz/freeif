@@ -136,7 +136,7 @@ export function OddsChart({ promo, odds, merchant, mechanics }: { promo: Promo; 
                   className="label pointer-events-none absolute bottom-1 whitespace-nowrap bg-card/85 px-1"
                   style={left(kickoff) < 50 ? { left: `calc(${left(kickoff)}% + 4px)` } : { right: `calc(${100 - left(kickoff)}% + 4px)` }}
                 >
-                  {promo.subject ? "Kickoff" : "Start"}
+                  {promo.subject ? "Kickoff" : promo.league === "Daily Temperature" ? "Day begins" : "Start"}
                 </span>
               </>
             )}

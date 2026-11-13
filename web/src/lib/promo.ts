@@ -1,7 +1,7 @@
 // A promo in words: its title, the customer's card state, and the one sentence that tells a merchant
 // what is going on (prep/WIREFRAMES.md sections 6, 8 and 9.1).
 import type { CardState } from "@/components/receipt-card";
-import { capitalize, timeOf, usd } from "./format";
+import { capitalize, timeOf, usd, type Amount } from "./format";
 import type { FeedEvent, Promo } from "./keeper";
 
 /** "Wings are free if the Lions win". Without an item: "Free if the Lions win". */
@@ -13,6 +13,18 @@ export function promoTitle(item: string | null | undefined, condition: string | 
   const plural = /[^s]s$/i.test(name);
   return `${name} ${plural ? "are" : "is"} free if ${what}`;
 }
+
+/**
+ * A promo that pays the business itself (hedge mode): "$250.00 to Tony's Pizza if the high in Austin on
+ * November 14 is 66°F or below". The pages call it a cover.
+ */
+export function coverTitle(amount: Amount, business: string | null | undefined, condition: string | null | undefined): string {
+  return `${usd(amount)} to ${business?.trim() || "your business"} if ${condition ?? "it happens"}`;
+}
+
+/** A promo's headline: what is free for its customers, or what the business gets. */
+export const titleOf = (p: Pick<Promo, "hedgeMode" | "item" | "business" | "condition" | "payoutPerClaim">): string =>
+  p.hedgeMode ? coverTitle(p.payoutPerClaim, p.business, p.condition) : promoTitle(p.item, p.condition);
 
 const won = (p: Promo): string => (p.subject ? `${capitalize(p.subject)} won.` : "It happened.");
 const lost = (p: Promo): string => (p.subject ? `${capitalize(p.subject)} lost.` : "It didn't happen.");
@@ -47,6 +59,7 @@ export type StatusLine = { badge: string; tone: "go" | "plain" | "grey"; sentenc
 
 /** The top block of the promo page. It answers "what do I need to do", and the answer is nothing. */
 export function statusLine(p: Promo, now: number, merchant: boolean): StatusLine {
+  if (p.hedgeMode) return coverStatus(p, merchant);
   const paid = usd(p.premiumPaid);
   const each = usd(p.payoutPerClaim);
   const total = usd(BigInt(p.payoutPerClaim) * BigInt(p.claimCount));
@@ -93,6 +106,42 @@ export function statusLine(p: Promo, now: number, merchant: boolean): StatusLine
   }
 }
 
+/** The same for a cover: one payout, to the business itself, and nobody to wait for at the counter. */
+function coverStatus(p: Promo, merchant: boolean): StatusLine {
+  const amount = usd(p.payoutPerClaim);
+  const paid = usd(p.premiumPaid);
+  const who = merchant ? "you" : (p.business ?? "the business");
+  const youPaid = merchant ? `You paid ${paid}` : `${capitalize(who)} paid ${paid}`;
+  switch (p.status) {
+    case "Open":
+      return {
+        badge: "COVERED",
+        tone: "go",
+        sentence: `If ${p.condition ?? "it happens"}, ${who} ${merchant ? "get" : "gets"} ${amount}. Nothing to do until the result is in.`,
+      };
+    case "Settled":
+      return {
+        badge: "CONFIRMING",
+        tone: "plain",
+        sentence: p.outcomeYes ? `It happened. Paying ${who} ${amount} shortly.` : "It didn't happen. Confirming the result.",
+      };
+    case "FinalizedYes":
+      return { badge: "PAYING", tone: "go", sentence: `It happened. Paying ${who} ${amount}.` };
+    case "PaidOut":
+      return {
+        badge: "✓ PAID",
+        tone: "go",
+        sentence: `It happened. ${capitalize(who)} ${merchant ? "were" : "was"} paid ${amount}. ${youPaid} and nothing more.`,
+      };
+    case "FinalizedNo":
+      return { badge: "OVER", tone: "grey", sentence: `It didn't happen. Nothing is owed. ${youPaid}.` };
+    case "Vetoed":
+      return { badge: "UNDER REVIEW", tone: "plain", sentence: "The result is being checked. Nothing to do." };
+    case "Voided":
+      return { badge: "CANCELLED", tone: "grey", sentence: merchant ? `This was cancelled. Your ${paid} was refunded.` : "This was cancelled." };
+  }
+}
+
 /** One step of the promo's timeline. `at` is null for a step that has not happened yet. */
 export type TimelineStep = { label: string; at: number | null; paid?: boolean };
 
@@ -104,11 +153,18 @@ export type TimelineStep = { label: string; at: number | null; paid?: boolean };
 export function timeline(p: Promo, merchant: boolean): TimelineStep[] | null {
   if (p.status === "Open") return null;
   const when = (name: FeedEvent["event"]): number | null => p.events.findLast((e) => e.event === name)?.at ?? null;
-  const started: TimelineStep = { label: "Promo started", at: p.events.find((e) => e.event === "PromoCreated")?.at ?? null };
+  const started: TimelineStep = {
+    label: p.hedgeMode ? "Cover started" : "Promo started",
+    at: p.events.find((e) => e.event === "PromoCreated")?.at ?? null,
+  };
 
   if (p.status === "Voided") {
     const at = when("Voided");
-    return [started, { label: "Game cancelled", at }, { label: merchant ? `Your ${usd(p.premiumPaid)} was refunded` : "The shop was refunded", at }];
+    return [
+      started,
+      { label: p.hedgeMode ? "Cancelled" : "Game cancelled", at },
+      { label: merchant ? `Your ${usd(p.premiumPaid)} was refunded` : `The ${p.hedgeMode ? "business" : "shop"} was refunded`, at },
+    ];
   }
 
   const what = p.outcomeYes ? won(p) : lost(p);
@@ -119,11 +175,17 @@ export function timeline(p: Promo, merchant: boolean): TimelineStep[] | null {
   const confirmed = when("Finalized");
   let last: TimelineStep;
   if (p.status === "Vetoed") {
-    last = { label: "Customers paid", at: null };
+    last = { label: p.hedgeMode ? "Paid" : "Customers paid", at: null };
   } else if (!p.outcomeYes) {
     // A "no": the last step is the result becoming final.
     const at = p.status === "FinalizedNo" ? confirmed : null;
-    last = { label: at === null ? "Confirming the result" : "Result confirmed. Nobody is owed anything.", at };
+    last = { label: at === null ? "Confirming the result" : `Result confirmed. ${p.hedgeMode ? "Nothing is owed." : "Nobody is owed anything."}`, at };
+  } else if (p.hedgeMode) {
+    // A cover: the one payout goes to the business itself.
+    const at = p.status === "PaidOut" ? (when("Paid") ?? confirmed) : null;
+    const who = merchant ? "You" : (p.business ?? "The business");
+    const verb = at === null ? (merchant ? "get" : "gets") : merchant ? "were paid" : "was paid";
+    last = { label: `${who} ${verb} ${usd(p.payoutPerClaim)}`, at, paid: true };
   } else if (p.claimCount === 0) {
     const at = p.status === "PaidOut" ? confirmed : null;
     last = { label: at === null ? "Confirming the result" : "Nobody was covered, so nobody is owed anything", at };
@@ -162,9 +224,10 @@ export function feedLines(p: Promo, merchant: boolean): FeedLine[] {
   const describe = (e: FeedEvent): string | null => {
     switch (e.event) {
       case "PromoCreated":
-        return `Promo started. ${merchant ? "You" : "The shop"} paid ${usd(e.amount)}.`;
+        return `${p.hedgeMode ? "Cover" : "Promo"} started. ${merchant ? "You" : p.hedgeMode ? "The business" : "The shop"} paid ${usd(e.amount)}.`;
       case "ClaimRegistered":
-        return `${who(e)} covered`;
+        // A cover registers the business itself in the transaction that starts it: not a line of its own.
+        return p.hedgeMode ? null : `${who(e)} covered`;
       case "Settled": {
         // "Result: the Lions won".
         const what = e.outcomeYes ? won(p) : lost(p);
@@ -177,11 +240,11 @@ export function feedLines(p: Promo, merchant: boolean): FeedLine[] {
       case "Finalized":
         return "Result confirmed";
       case "Voided":
-        return `Game cancelled. ${usd(e.amount)} refunded.`;
+        return `${p.hedgeMode ? "Cancelled" : "Game cancelled"}. ${usd(e.amount)} refunded.`;
       case "Paid":
-        return `${who(e)} paid ${usd(e.amount)}`;
+        return p.hedgeMode ? `${merchant ? "You were" : "The business was"} paid ${usd(e.amount)}` : `${who(e)} paid ${usd(e.amount)}`;
       case "PayoutFailed":
-        return `${who(e)}'s ${usd(e.amount)} is waiting. We'll send it again.`;
+        return p.hedgeMode ? `${usd(e.amount)} is waiting. We'll send it again.` : `${who(e)}'s ${usd(e.amount)} is waiting. We'll send it again.`;
       default:
         return null;
     }
