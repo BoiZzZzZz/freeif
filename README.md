@@ -23,10 +23,12 @@ A pizza shop has no underwriter to call and should not need a trading account. R
 
 It sells that cover as one fixed price, paid once, and pays the customers itself.
 
-1. **The shop sets it up** ([`/merchant`](https://freeif.app/merchant), under a minute). Pick a game and a team from a list, say what is free and what it costs, and how many customers. The form shows the chance, the most the shop could owe, and one cost: for wings at $8 for two customers if the Patriots win, $7.06 when the chance was 42%. Pay with an email login. The shop gets a code for its counter.
-2. **A customer gets covered** (`/claim/[id]`, about ten seconds). Scan the code, type an email and the 6-digit code it is sent. The card reads "Wings", "$8.00", "Free if the Patriots win", and is stamped COVERED. No app, no fee, nothing to install.
+1. **The shop sets it up** ([`/merchant`](https://freeif.app/merchant), under a minute). Pick a game and a team from a list, say what is free and what it costs, and how many customers. The form shows the chance, the most the shop could owe, and one cost: for wings at $8 for two customers if the Patriots win, $7.06 when the chance was 42%. Pay with an email login. The shop's browser then makes one claim card per customer, and the shop prints them: a QR code each.
+2. **A customer gets a card** (at the counter, with the purchase). The card reads "Wings", "Free if the Patriots win", "Worth $8.00 if the Patriots win". No app, no email, nothing to do yet. Scanning it shows what it is worth and when the result is due.
 3. **The game is played.** Nobody does anything. The promo's page shows how the chance moves.
-4. **The result comes in.** Gemini settles the market, the keeper posts the result to the vault, and after a dispute window the vault pays every covered customer. The card turns over: "$8.00", "✓ PAID". If the team loses, nobody is owed anything and the shop has paid what it agreed to pay.
+4. **The result comes in.** Gemini settles the market, the keeper posts the result to the vault, and after a dispute window the vault pays every card. Scan the card: "This card is worth $8.00". Log in with an email and the card's money moves into your FreeIf account, ready to cash out. If the team loses, the card reads "This card didn't win", nobody logs in, and the shop has paid what it agreed to pay.
+
+Each card is its own small account on Arc. Its key is made in the shop's browser and printed in the QR code after a `#`, which a browser never sends to a server: the keeper only ever sees the card's address, and registers it on the vault as a customer before kickoff. Cards are switched on by one keeper setting from a given promo on (`CARDS_FROM_PROMO`); promos before it, which is every promo on the vault so far, use a code at the counter instead: the customer scans it, logs in by email, and is covered under that login (`/claim/[id]`), then paid into their account.
 
 Behind it is a vault of USDC on Arc. Liquidity providers fund it ([`/lp`](https://freeif.app/lp)); every promo's whole payout is locked in it until the result; the price of a promo is what its hedge would cost on Gemini's prediction market, plus 5%.
 
@@ -39,7 +41,7 @@ Merchant and customer screens never say prediction market, USDC, wallet or gas. 
 ```mermaid
 flowchart TB
   merchant["Shop owner<br/>/merchant"]
-  customer["Customer<br/>/claim"]
+  customer["Customer<br/>/card"]
   pages["Promo page and vault page<br/>/promo, /lp"]
   lp["Liquidity provider<br/>/lp, browser wallet"]
   keeper["Keeper (Node, Railway)<br/>pricing, claim relayer, settlement loop,<br/>odds history, hedge, event feed"]
@@ -51,7 +53,8 @@ flowchart TB
 
   merchant -->|"live price, signed quote"| keeper
   merchant -->|"one transaction: permit + createPromoWithPermit"| vault
-  customer -->|"claim, with the email login"| keeper
+  merchant -->|"card addresses, with the email login"| keeper
+  customer -->|"scan: the card's promo and result"| keeper
   keeper -->|"whose login is this?"| circle
   keeper -->|"registerClaim, settle, finalize, payoutBatch"| vault
   lp -->|"deposit, withdraw"| vault
@@ -80,7 +83,7 @@ flowchart TB
 | | |
 |---|---|
 | Vault | [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d) on Arc testnet (chain 5042002), verified |
-| App | [`https://freeif.app`](https://freeif.app): [`/merchant`](https://freeif.app/merchant) sets up a promo, `/claim/[id]` covers a customer, `/promo/[id]` is its status page, [`/lp`](https://freeif.app/lp) is the vault for liquidity providers. Add `?mechanics=1` to see where each number comes from. Details in [`web/README.md`](web/README.md) |
+| App | [`https://freeif.app`](https://freeif.app): [`/merchant`](https://freeif.app/merchant) sets up a promo, `/promo/[id]/cards` prints its claim cards, `/card/[id]` is a scanned card, `/claim/[id]` covers a customer on a promo with a code at the counter, `/promo/[id]` is its status page, [`/lp`](https://freeif.app/lp) is the vault for liquidity providers. Add `?mechanics=1` to see where each number comes from. Details in [`web/README.md`](web/README.md) |
 | Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
 | First payout | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
 | So far (Nov 13) | 22 promos created. 19 have run to their end: 9 paid their customers, 10 ended "no". Three are open: two on Sunday's Patriots at Lions game and one on Saturday's high in Austin |
@@ -129,7 +132,8 @@ This is a testnet demo, unaudited. What it trusts, and what can go wrong:
 - **The vault is not hedged.** The hedge is a sandbox order. Promos on the same game win or lose together, and the only limit across promos is the pricing service's.
 - **Gemini's price can be thin or wrong.** The chance comes from one order book. A book with one side, or with its sides more than half a dollar apart, is priced with a wider spread or refused, and a promo bigger than the offers pays more for the part past them. A real hedge would also carry basis risk: Gemini's sandbox is not its live exchange, and a quote is good for 90 seconds while the book moves. On a market that is already running (the test loop's 5 and 15-minute markets) those 90 seconds are time to watch the price and use the quote only if it moved the buyer's way, so the keeper signs a quote on one only for a request that carries its secret test key (`CLAIM_TEST_KEY`), and not at all with the key unset. An event with no start time that is not a day's temperature is not sold.
 - **Liquidity providers.** Leaving while promos are open forfeits a part of their locks (above). A deposit made while promos are open takes their loss side and none of their premium.
-- **Who is a customer.** Nothing on chain proves that a covered customer bought anything. The controls are the code at the counter, one cover per email login per promo (the keeper asks Circle whose login a claim carries), and the customer cap the merchant paid for. The fix is the till issuing the claim. While the test loop is in use the keeper also takes a claim with no login when the request carries a secret test key it holds (`CLAIM_TEST_KEY`), the same key a quote on a test market needs (above); with the key unset that way in does not exist.
+- **Who is a customer.** Nothing on chain proves that a covered customer bought anything. On a card promo the shop decides, by handing a card over the counter with a purchase: there is no public code, and the promo's page and sign have nothing to claim. The cards are made only by the login that paid for the promo, and there are only as many as the customers it paid for. Cards nobody was handed are the shop's, and that costs the vault nothing it did not price: every promo is priced as if every place were taken. On a promo with a code at the counter, the controls are the code, one cover per email login per promo (the keeper asks Circle whose login a claim carries), and the customer cap the merchant paid for. The fix for both is the till issuing the card.
+- **A card is like cash.** Whoever holds a card, or a photo of its code, can collect it, and nothing can stop a collection once it is signed. A card that is lost, or never scanned, keeps its money for good: the vault has paid it, and nobody else can move it. Until they are printed, a promo's cards exist only in the browser that made them (the page says so in red); clearing that browser first loses them. While the test loop is in use the keeper also takes a claim with no login when the request carries a secret test key it holds (`CLAIM_TEST_KEY`), the same key a quote on a test market needs (above); with the key unset that way in does not exist.
 - **Accounts.** Merchant and customer accounts are Circle user-controlled wallets behind an email code. Whoever controls the email controls the account.
 - **A payout that fails.** A transfer that fails does not stop a batch: that payout is set aside inside the lock and sent again. USDC has a blocklist; a promo whose merchant is on it cannot be voided, and is settled instead.
 - **No reentrancy guard.** State changes come before transfers, and on Arc a USDC transfer runs no code at the receiving address (checked by simulation). The token is a proxy: if it is upgraded, that has to be checked again.
@@ -151,7 +155,8 @@ The vault, every promo and every payout are on Arc testnet (chain 5042002). What
   | Confirm it (`finalize`) | The keeper | $0.0010 |
   | Pay three customers (`payoutBatch`) | The keeper | $0.0024 |
 
-  A whole promo with three customers cost about two cents. The merchant pays the first line from the same balance as the promo's price. To get covered and to be paid, a customer never pays a fee or signs a transaction; cashing out afterwards is one transfer from the customer's own account, which pays its own fee (a fraction of a cent).
+  A whole promo with three customers cost about two cents. The merchant pays the first line from the same balance as the promo's price. To get a card or a cover and to be paid, a customer never pays a fee or signs a transaction. Collecting a card is one transfer, signed in the browser with the card's own key, and the card pays its fee (a fraction of a cent) out of the money on it; cashing out afterwards is one transfer from the customer's own account, which pays its own fee the same way.
+- **A card needs nothing but its dollars.** A claim card is a bare key with no Circle account behind it. Because the network fee on Arc is paid in USDC, a card that holds $8.00 can move its $8.00 by itself: no second token has to reach the card first. The page holds back the fee for a 20% margin over the estimated gas, so what the fee does not use stays on the card.
 - **Pay in one transaction.** Arc's USDC has `permit` (EIP-2612). The merchant's account signs a permit for exactly the promo's price, and `createPromoWithPermit` spends it in the same transaction. No standing approval is left behind.
 - **Payouts pushed, not claimed.** A USDC transfer on Arc runs no code at the receiving address, so the vault can pay a promo's customers in batches with no step from them (the keeper sends 50 per transaction). A transfer that fails does not stop the batch: that payout is set aside and retried. On promo 14 the three customers were paid 5 seconds after the result was confirmed.
 - **Accounts by email.** Merchants and customers log in with an email code; their accounts are Circle user-controlled wallets on Arc. Only the vault's page for liquidity providers uses a browser wallet.
@@ -232,7 +237,7 @@ The Stream is made, tested, paused and removed by one script, `keeper/scripts/st
 1. **A real hedge.** Send part of each premium to Gemini, buy the contracts, bring the proceeds back. It needs a path for the vault's money that the contract does not have, and it turns the vault's risk into basis risk.
 2. **A fair exit for liquidity providers.** A withdrawal queue, or accounting per promo, so leaving while promos are open does not forfeit a part of their locks.
 3. **Less trust.** The cap across promos in the contract. A second reporter and a dispute oracle for results. A multisig owner with a timelock.
-4. **Claims from the till.** A point-of-sale integration that issues the claim with the receipt, so only a purchase can be covered.
+4. **Cards from the till.** A point-of-sale integration that prints the claim card on the receipt, so only a purchase gets one.
 5. **More to cover.** Any market Gemini lists can be a promo or a cover; the form offers five sports leagues and daily temperatures today.
 6. **Money out.** Cash out sends test dollars to an address (built, and checked by simulation; not yet run with a real login). A bank or a card comes with a payments partner.
 7. **A pilot.** A handful of bars and pizza shops for one season, with a licensed prize-indemnity carrier behind the vault.
@@ -254,7 +259,7 @@ pnpm install
 pnpm test
 ```
 
-Needs Node 24 and pnpm. 198 tests; Gemini, Circle and the chain are fakes in them, and three read the deployed vault when `VAULT_ADDRESS` is set.
+Needs Node 24 and pnpm. 219 tests; Gemini, Circle and the chain are fakes in them, and three read the deployed vault when `VAULT_ADDRESS` is set.
 
 ## Run the web app
 
