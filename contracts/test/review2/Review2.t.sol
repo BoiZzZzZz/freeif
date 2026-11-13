@@ -117,39 +117,40 @@ contract Review2FindingsTest is DeployedShape {
         );
     }
 
-    /// FINDING 2 (low; a confirmed pick, shown here with its cost). Pause blocks `registerClaim`.
-    /// A promo's whole payout is locked when it is created, so a claim adds no risk the vault did
-    /// not already take; blocking it only takes away what the merchant paid for. A pause that
-    /// covers the end of a claim window leaves the merchant with no customers, the result is
-    /// posted as usual, and the premium goes to the LPs. Nothing in the contract gives it back:
-    /// `voidPromo` needs an Open or Vetoed promo and the grace period after the market closes.
-    function test_finding_pauseOverAClaimWindow_theMerchantPaysForCoverNobodyCanTake() public {
+    /// FINDING 2 (low), fixed in v2. Pause used to block `registerClaim`. A promo's whole payout
+    /// is locked when it is created, so a claim adds no risk the vault did not already take, and
+    /// blocking it only took away what the merchant paid for: a pause over the end of a claim
+    /// window left the merchant with no customers, the result was posted as usual, the premium
+    /// went to the LPs, and `voidPromo` could not give it back (it needs an Open or Vetoed promo
+    /// and the grace period after the market closes). Since v2 a pause does not block claims. This
+    /// test was `test_finding_pauseOverAClaimWindow_theMerchantPaysForCoverNobodyCanTake`; it now
+    /// shows the customer registered and paid with the vault paused from the claim to the payout.
+    function test_registerClaim_pauseOverAClaimWindow_theCustomerIsStillRegisteredAndPaid() public {
         address customer = makeAddr("a customer at the till");
         uint256 lpBefore = _withdrawable(deployer);
 
         vault.pause(); // the owner stops new risk because of some incident elsewhere
         vm.prank(relayer);
-        vm.expectRevert(PromoVault.VaultPaused.selector);
         vault.registerClaim(game1, customer);
+        assertTrue(vault.hasClaim(game1, customer));
+        assertEq(vault.getPromo(game1).claimCount, 1);
 
         vm.warp(vault.getPromo(game1).claimDeadline); // kickoff, still paused
-        vault.unpause();
 
-        // The team wins. The keeper posts the result and finalizes, as it does for every promo.
+        // The team wins. The keeper posts the result, finalizes and pays, all while paused.
         vm.prank(oracle);
         vault.settle(game1, true, EVENT_ID_PLAIN, "yes");
         vm.warp(block.timestamp + 30);
         vault.finalize(game1);
+        assertEq(uint8(vault.getPromo(game1).status), uint8(PromoVault.Status.FinalizedYes));
+        assertEq(vault.payoutBatch(game1, 50), 1);
 
+        assertTrue(vault.paused());
         assertEq(uint8(vault.getPromo(game1).status), uint8(PromoVault.Status.PaidOut));
-        assertEq(usdc.balanceOf(customer), 0, "the customer bought on a winning night and gets nothing");
-        assertEq(usdc.balanceOf(merchant), 0, "the merchant's $3.62 is not returned");
-        assertEq(
-            _withdrawable(deployer) - lpBefore, 7_999_840, "the LPs keep the whole $8 lock, premium included"
-        );
-
-        vm.expectRevert(abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.PaidOut));
-        vault.voidPromo(game1);
+        assertEq(usdc.balanceOf(customer), 8 * USDC, "the customer bought on a winning night and is paid");
+        // The LPs carried the $4.38 of risk all along: the whole $8 was outside the free balance.
+        assertEq(_withdrawable(deployer), lpBefore, "the LPs lose nothing they could have withdrawn");
+        assertEq(vault.lockedCollateral(), 18 * USDC, "the other two promos still lock $16 and $2");
     }
 }
 

@@ -168,15 +168,31 @@ contract RegisterClaimTest is VaultTest {
         vault.registerClaim(promoId, address(0));
     }
 
-    function test_registerClaim_revertsWhilePaused() public {
+    /// v2: a pause does not block claims. The promo locked every payout when it was created, so a
+    /// claim takes no new risk; blocking it would only take away what the merchant paid for.
+    function test_registerClaim_worksWhilePaused() public {
+        uint256 lockedBefore = vault.lockedCollateral();
+        uint256 balanceBefore = usdc.balanceOf(address(vault));
         vault.pause();
+
+        vm.expectEmit(address(vault));
+        emit ClaimRegistered(promoId, carol, 1);
         vm.prank(relayer);
-        vm.expectRevert(PromoVault.VaultPaused.selector);
         vault.registerClaim(promoId, carol);
 
+        assertTrue(vault.paused());
+        assertTrue(vault.hasClaim(promoId, carol));
+        assertEq(vault.getPromo(promoId).claimCount, 1);
+        assertEq(vault.claimants(promoId, 0), carol);
+        assertEq(vault.lockedCollateral(), lockedBefore);
+        assertEq(usdc.balanceOf(address(vault)), balanceBefore);
+
+        // And on through an unpause, the count running on.
         vault.unpause();
+        vm.expectEmit(address(vault));
+        emit ClaimRegistered(promoId, dave, 2);
         vm.prank(relayer);
-        vault.registerClaim(promoId, carol);
+        vault.registerClaim(promoId, dave);
     }
 
     /// Hedge mode takes its one claim at creation, so nobody can register another.
@@ -191,5 +207,105 @@ contract RegisterClaimTest is VaultTest {
         vm.expectRevert(abi.encodeWithSelector(PromoVault.PromoFull.selector, 1));
         vault.registerClaim(hedge, merchant);
         vm.stopPrank();
+    }
+}
+
+/// v2: every claim rule still holds while the vault is paused. Only the pause check is gone.
+contract RegisterClaimWhilePausedTest is VaultTest {
+    address internal carol = makeAddr("carol");
+    address internal dave = makeAddr("dave");
+
+    uint256 internal promoId;
+    uint256 internal hedge;
+    uint64 internal claimDeadline;
+
+    function setUp() public override {
+        super.setUp();
+        _deposit(alice, 10_000 * USDC);
+        promoId = _createPromo(20 * USDC, 3, 24 * USDC);
+        PromoVault.Quote memory q = _quote(500 * USDC, 1, 205 * USDC);
+        q.hedgeMode = true;
+        hedge = _create(q);
+        claimDeadline = vault.getPromo(promoId).claimDeadline;
+        vault.pause();
+    }
+
+    function test_registerClaim_whilePaused_revertsForEveryCallerButTheClaimSigner() public {
+        address[6] memory callers = [merchant, address(this), oracle, pricer, carol, alice];
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.prank(callers[i]);
+            vm.expectRevert(PromoVault.NotClaimSigner.selector);
+            vault.registerClaim(promoId, carol);
+        }
+        assertEq(vault.getPromo(promoId).claimCount, 0);
+
+        vm.prank(relayer);
+        vault.registerClaim(promoId, carol);
+    }
+
+    function testFuzz_registerClaim_whilePaused_revertsForEveryCallerButTheClaimSigner(address caller)
+        public
+    {
+        vm.assume(caller != relayer);
+        vm.prank(caller);
+        vm.expectRevert(PromoVault.NotClaimSigner.selector);
+        vault.registerClaim(promoId, carol);
+    }
+
+    function test_registerClaim_whilePaused_revertsAtTheClaimDeadline() public {
+        vm.warp(claimDeadline - 1);
+        vm.prank(relayer);
+        vault.registerClaim(promoId, carol);
+
+        vm.warp(claimDeadline);
+        vm.prank(relayer);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.ClaimsClosed.selector, claimDeadline));
+        vault.registerClaim(promoId, dave);
+    }
+
+    function test_registerClaim_whilePaused_revertsWhenThePromoIsFull() public {
+        vm.startPrank(relayer);
+        vault.registerClaim(promoId, carol);
+        vault.registerClaim(promoId, dave);
+        vault.registerClaim(promoId, bob);
+
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.PromoFull.selector, 3));
+        vault.registerClaim(promoId, alice);
+        vm.stopPrank();
+    }
+
+    function test_registerClaim_whilePaused_revertsOnASecondClaimByTheSameCustomer() public {
+        vm.startPrank(relayer);
+        vault.registerClaim(promoId, carol);
+
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.AlreadyClaimed.selector, carol));
+        vault.registerClaim(promoId, carol);
+        vm.stopPrank();
+    }
+
+    function test_registerClaim_whilePaused_revertsOnTheZeroAddress() public {
+        vm.prank(relayer);
+        vm.expectRevert(PromoVault.ZeroAddress.selector);
+        vault.registerClaim(promoId, address(0));
+    }
+
+    function test_registerClaim_whilePaused_revertsOnceSettled() public {
+        _settle(promoId, true);
+
+        vm.prank(relayer);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.Settled));
+        vault.registerClaim(promoId, carol);
+    }
+
+    function test_registerClaim_whilePaused_revertsForAnUnknownPromo() public {
+        vm.prank(relayer);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.UnknownPromo.selector, 7));
+        vault.registerClaim(7, carol);
+    }
+
+    function test_registerClaim_whilePaused_hedgeMode_stillReverts() public {
+        vm.prank(relayer);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.PromoFull.selector, 1));
+        vault.registerClaim(hedge, carol);
     }
 }

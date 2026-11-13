@@ -8,8 +8,9 @@ import {MockUSDC} from "./mocks/MockUSDC.sol";
 /// @dev Drives the vault through random sequences of every state-changing call. Each action first
 ///      looks for a promo (or LP, or customer) it can legally act on and does nothing if there is
 ///      none, so a revert inside an action is a real failure: the invariant run has
-///      fail_on_revert on. That turns "withdraw, finalize, payoutBatch and voidPromo always work
-///      when they are due, paused or not" into something every run checks. The `forbidden`
+///      fail_on_revert on. That turns "withdraw, registerClaim, finalize, payoutBatch and
+///      voidPromo always work when they are due, paused or not" into something every run checks
+///      (registerClaim since v2). The `forbidden`
 ///      action does the opposite: it tries calls the SPEC rules out and fails if one succeeds.
 contract VaultHandler is Test {
     uint256 internal constant USDC = 1e6;
@@ -259,8 +260,8 @@ contract VaultHandler is Test {
         _afterAction();
     }
 
+    /// @dev Paused or not: since v2 a pause does not block claims.
     function registerClaim(uint256 promoSeed, uint256 customerSeed) external {
-        if (vault.paused()) return;
         (bool found, uint256 promoId) = _find(promoSeed, Step.Claim);
         if (found) _claim(promoId, customerSeed);
     }
@@ -351,8 +352,7 @@ contract VaultHandler is Test {
             uint256 promoId = (promoSeed % n + i) % n;
             PromoVault.Promo memory p = vault.getPromo(promoId);
             if (p.status == PromoVault.Status.Open) {
-                bool claimable =
-                    block.timestamp < p.claimDeadline && p.claimCount < p.maxClaims && !vault.paused();
+                bool claimable = block.timestamp < p.claimDeadline && p.claimCount < p.maxClaims;
                 if (claimable && seed % 3 != 0) return _claim(promoId, seed);
                 if (block.timestamp < p.claimDeadline) vm.warp(p.claimDeadline);
                 return _settle(promoId, outcomeYes);
@@ -384,7 +384,8 @@ contract VaultHandler is Test {
     ///      6  a second promo from a quote nonce that has been used
     ///      7  retryPayout for a customer who is owed nothing, or who is still blocked
     ///      8  the same spent nonce through createPromoWithPermit, with a good permit
-    ///      9  a new promo while the vault is paused, by either function, from a good quote
+    ///      9  a new promo while the vault is paused, by either function, from a good quote, or
+    ///         a deposit while the vault is paused
     function forbidden(uint256 promoSeed, uint256 kind, address caller) external {
         uint256 n = vault.promoCount();
         if (n == 0) return;
@@ -422,7 +423,12 @@ contract VaultHandler is Test {
         } else if (kind == 9) {
             if (!vault.paused()) return;
             uint256 seed = uint160(caller);
-            data = _createCall(_newQuote(seed, seed, uint32(seed), seed, false, seed, seed), seed % 2 == 0);
+            if (seed % 3 == 2) {
+                data = _depositCall(seed);
+            } else {
+                data =
+                    _createCall(_newQuote(seed, seed, uint32(seed), seed, false, seed, seed), seed % 3 == 0);
+            }
         } else {
             // The last quote again, re-dated and re-signed by the pricer, with its spent nonce.
             PromoVault.Quote memory q = lastQuote;
@@ -452,6 +458,18 @@ contract VaultHandler is Test {
             usdc.approve(address(vault), q.premium);
         }
         vm.prank(q.merchant);
+    }
+
+    /// @dev Calldata for a deposit by an LP who holds and has approved the amount. The next call
+    ///      is made as the LP.
+    function _depositCall(uint256 seed) internal returns (bytes memory data) {
+        address lp = lps[seed % lps.length];
+        uint256 amount = bound(seed, 1_001, 5_000 * USDC);
+        usdc.mint(lp, amount);
+        vm.prank(lp);
+        usdc.approve(address(vault), amount);
+        data = abi.encodeCall(vault.deposit, (amount));
+        vm.prank(lp);
     }
 
     // ------------------------------------------------------------ time and admin

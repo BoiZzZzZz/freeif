@@ -193,8 +193,9 @@ contract PromoVault is EIP712 {
         _;
     }
 
-    /// @dev Only on the functions that take new money or new risk. Withdrawals, settlement and
-    ///      every payout path stay open, so a pause cannot trap funds.
+    /// @dev Only on the functions that take new money or new risk: deposit, createPromo and
+    ///      createPromoWithPermit. Withdrawals, claims, settlement and every payout path stay open,
+    ///      so a pause cannot trap funds or take away cover a merchant has already paid for.
     modifier whenNotPaused() {
         if (paused) revert VaultPaused();
         _;
@@ -400,8 +401,11 @@ contract PromoVault is EIP712 {
 
     /// @notice Register a customer for a promo. Only the promo's claim signer (the relayer named
     ///         in the quote) may call this; the merchant and the owner cannot.
-    /// @dev In hedge mode the one claim is taken at creation, so this always reverts.
-    function registerClaim(uint256 promoId, address customer) external whenNotPaused {
+    /// @dev In hedge mode the one claim is taken at creation, so this always reverts. Works while
+    ///      the vault is paused: the promo locked every claim's payout when it was created, so a
+    ///      claim adds no risk, and a pause over a claim window would otherwise leave the merchant
+    ///      paying for cover no customer could take.
+    function registerClaim(uint256 promoId, address customer) external {
         Promo storage p = _promo(promoId);
         if (msg.sender != p.claimSigner) revert NotClaimSigner();
         if (p.status != Status.Open) revert WrongStatus(p.status);
@@ -624,7 +628,8 @@ contract PromoVault is EIP712 {
         emit VoidGraceSet(grace);
     }
 
-    /// @notice Stop new deposits, new promos and new claims. Nothing else is affected.
+    /// @notice Stop new deposits and new promos. Nothing else is affected: claims on promos already
+    ///         open, withdrawals, settlement and payouts all go on.
     function pause() external onlyOwner {
         paused = true;
         emit Paused(msg.sender);
