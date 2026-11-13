@@ -21,6 +21,29 @@ Built for the UBC Hackathon 2026 (DeFi track). Work in progress: this README gro
 | Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
 | First payout | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
 
+## How Arc is used
+
+The vault, every promo and every payout are on Arc testnet (chain 5042002). What Arc gives this app:
+
+- **One currency.** USDC is what a merchant pays with, what the vault holds, what a customer is paid in, and what the network fee is paid in. A merchant's account needs USDC and nothing else: no second token to buy before the first promo.
+- **Fees a shop can ignore.** Measured on two test promos on Nov 13 (at 20 to 23 gwei):
+
+  | Step | Who sends it | Fee |
+  |---|---|---|
+  | Start a promo (`createPromoWithPermit`) | The merchant's account | $0.0068 |
+  | Cover one customer (`registerClaim`) | The keeper's relayer | $0.0018 to $0.0021 |
+  | Post the result (`settle`) | The keeper | $0.0008 |
+  | Confirm it (`finalize`) | The keeper | $0.0010 |
+  | Pay three customers (`payoutBatch`) | The keeper | $0.0024 |
+
+  A whole promo with three customers cost under two cents. The merchant pays the first line from the same balance as the promo's price; a customer never pays a fee or signs a transaction.
+- **Pay in one transaction.** Arc's USDC has `permit` (EIP-2612). The merchant's account signs a permit for exactly the promo's price, and `createPromoWithPermit` spends it in the same transaction. No standing approval is left behind.
+- **Payouts pushed, not claimed.** A USDC transfer on Arc runs no code at the receiving address, so the vault can pay every customer of a promo in one batch. A transfer that fails does not stop the batch: that payout is set aside and retried. On promo 14 the three customers were paid 5 seconds after the result was confirmed.
+- **Accounts by email.** Merchants and customers log in with an email code; their accounts are Circle user-controlled wallets on Arc. Only the vault's page for liquidity providers uses a browser wallet.
+- **Fast enough to watch.** Blocks came every 0.5 to 1.1 seconds on the days measured, with one slow hour at 2 to 3 seconds.
+
+The contract is verified on Arc's explorer: [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d). One thing to know when reading it: as the gas token USDC has 18 decimals, and through its ERC-20 interface, which the vault uses, it has 6.
+
 ## How Gemini is used
 
 Gemini's prediction markets supply three things: the price of a promo, the picture of how that price moves, and the result. All of that is public market data read by the keeper (`keeper/src/gemini.ts`); no key is needed. The fourth use is a trade: the keeper places each promo's hedge as an order on Gemini's sandbox exchange (`keeper/src/hedge.ts`).
