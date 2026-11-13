@@ -26,3 +26,6 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# keeper data
+keeper/data/

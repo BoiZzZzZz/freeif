@@ -1,0 +1,264 @@
+// The pricing service's rules (SPEC section 2), with Gemini and the chain replaced by fakes.
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { keccak256, toBytes, verifyTypedData, type Address, type Hex } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { quoteDomain, quoteFromJson, quoteTypes, type PublicClient } from "../src/chain.ts";
+import type { GeminiEvent } from "../src/gemini.ts";
+import { Pricer, Refusal, type RefusalCode } from "../src/pricer.ts";
+import type { PricingParams } from "../src/pricing.ts";
+import { Store } from "../src/store.ts";
+
+const USDC = 1_000_000n;
+const VAULT: Address = "0x68a00243927f250dBcD9160b5d06623b62B2e06d";
+const TOKEN: Address = "0x3600000000000000000000000000000000000000";
+const RELAYER: Address = "0xa03aF58DF0B042fFA9342F178bb37F8a9f1E3286";
+const MERCHANT: Address = "0xF9Aac480396174FFF98988D25d74c78Af7Abfb88";
+const NOW = 1_794_500_000;
+const iso = (unix: number) => new Date(unix * 1000).toISOString();
+
+const params: PricingParams = {
+  spreadBps: 500,
+  minMarkupBps: 200,
+  loadingStepBps: 500,
+  loadingBpsPerStep: 0,
+  maxLockedBps: 6000,
+  exposureHeadroomBps: 9000,
+};
+
+const game = (over: Partial<GeminiEvent> = {}): GeminiEvent => ({
+  id: "362998",
+  ticker: "NFL-2610251700-IND-MIN-M",
+  title: "Colts at Vikings",
+  category: "Sports",
+  status: "active",
+  startTime: iso(NOW + 3 * 3600),
+  expiryDate: iso(NOW + 2 * 86400),
+  contracts: [
+    {
+      id: "362998-1",
+      label: "Vikings",
+      instrumentSymbol: "GEMI-NFL-2610251700-IND-MIN-M-MIN",
+      marketState: "open",
+      expiryDate: iso(NOW + 2 * 86400),
+      prices: { bestBid: "0.38", bestAsk: "0.39" },
+    },
+  ],
+  ...over,
+});
+
+const window5m = (closeIn: number): GeminiEvent => ({
+  id: "455093",
+  ticker: "BTC05M2611130405",
+  title: "BTC price today at 11:05pm EST",
+  category: "Crypto",
+  status: "active",
+  startTime: iso(NOW + closeIn - 300),
+  expiryDate: iso(NOW + closeIn),
+  contracts: [
+    {
+      id: "455093-1",
+      label: "Up",
+      instrumentSymbol: "GEMI-BTC05M2611130405-UP",
+      marketState: "open",
+      expiryDate: iso(NOW + closeIn),
+      prices: { bestAsk: "0.5" },
+    },
+  ],
+});
+
+type Chain = { balance: bigint; locked: bigint; paused: boolean; used: Set<Hex> };
+
+function setup(event: GeminiEvent | null, chain: Partial<Chain> = {}) {
+  const state: Chain = { balance: 20_000n * USDC, locked: 0n, paused: false, used: new Set(), ...chain };
+  const clock = { now: NOW };
+  const client = {
+    getBlockNumber: async () => 1n,
+    multicall: async ({ contracts }: { contracts: { functionName: string; args?: readonly unknown[] }[] }) =>
+      contracts[0]?.functionName === "balanceOf"
+        ? [state.balance, state.locked, 2000, state.paused]
+        : contracts.map((c) => state.used.has(c.args![0] as Hex)),
+  } as unknown as PublicClient;
+  const account = privateKeyToAccount(generatePrivateKey());
+  const store = new Store(null);
+  const pricer = new Pricer({
+    client,
+    vault: VAULT,
+    usdc: TOKEN,
+    account,
+    claimSigner: RELAYER,
+    params,
+    timing: { quoteTtlSeconds: 90, intervalCutoffSeconds: 60, minClaimWindowSeconds: 30 },
+    store,
+    now: () => clock.now,
+    fetchEvent: async () => event,
+  });
+  return { pricer, state, clock, store, account };
+}
+
+const wings = {
+  eventTicker: "NFL-2610251700-IND-MIN-M",
+  instrumentSymbol: "GEMI-NFL-2610251700-IND-MIN-M-MIN",
+  payoutPerClaim: 20n * USDC,
+  maxClaims: 200,
+};
+const btc = { eventTicker: "BTC05M2611130405", instrumentSymbol: "GEMI-BTC05M2611130405-UP", payoutPerClaim: USDC, maxClaims: 3 };
+
+async function refusal(run: Promise<unknown>, code: RefusalCode): Promise<Refusal> {
+  try {
+    await run;
+  } catch (err) {
+    assert.ok(err instanceof Refusal, `expected a Refusal, got ${String(err)}`);
+    assert.equal(err.code, code);
+    return err;
+  }
+  assert.fail(`expected a "${code}" refusal`);
+}
+
+test("getPrice_workedExample_showsTheMerchantsThreeLines", async () => {
+  const { pricer } = setup(game());
+  const p = await pricer.getPrice(wings);
+  assert.equal(p.breakdown.chance, 0.39);
+  assert.equal(p.breakdown.mostOwed, "4000000000");
+  assert.equal(p.breakdown.cost, "1638000000");
+  assert.equal(p.breakdown.fee, "78000000");
+  assert.equal(p.limit, "ok");
+  assert.equal(p.claimDeadline, NOW + 3 * 3600);
+  assert.equal(p.marketCloseTime, NOW + 2 * 86400);
+  // 20,000 free, 20% cap, 90% headroom: 3,600 at risk, at 11.81 of risk per customer.
+  assert.equal(p.maxCustomers, 304);
+});
+
+test("signQuote_signsExactlyWhatCreatePromoChecks", async () => {
+  const { pricer, account, store, clock } = setup(game());
+  const res = await pricer.signQuote({ ...wings, merchant: MERCHANT });
+  const q = quoteFromJson(res.quote);
+
+  assert.equal(q.merchant, MERCHANT);
+  assert.equal(q.claimSigner, RELAYER);
+  assert.equal(q.geminiEventId, keccak256(toBytes("362998")));
+  assert.equal(q.instrumentSymbol, keccak256(toBytes("GEMI-NFL-2610251700-IND-MIN-M-MIN")));
+  assert.equal(q.premium, 1_638n * USDC);
+  assert.equal(q.expiry, BigInt(clock.now + 90));
+  assert.equal(q.hedgeMode, false);
+  assert.ok(
+    await verifyTypedData({
+      address: account.address,
+      domain: quoteDomain(VAULT),
+      types: quoteTypes,
+      primaryType: "Quote",
+      message: q,
+      signature: res.signature,
+    }),
+  );
+  // The keeper will need the plain strings behind the two hashes to settle the promo.
+  assert.deepEqual(store.data.events[q.geminiEventId], { eventId: "362998", eventTicker: wings.eventTicker, title: "Colts at Vikings" });
+  assert.equal(store.data.instruments[q.instrumentSymbol]?.symbol, wings.instrumentSymbol);
+});
+
+test("signQuote_twoQuotes_haveDifferentNonces", async () => {
+  const { pricer } = setup(game());
+  const a = await pricer.signQuote({ ...wings, maxClaims: 10, merchant: MERCHANT });
+  const b = await pricer.signQuote({ ...wings, maxClaims: 10, merchant: MERCHANT });
+  assert.notEqual(a.quote.nonce, b.quote.nonce);
+});
+
+test("claimDeadline_game_isKickoffOr30MinutesBefore_neverLater", async () => {
+  const { pricer } = setup(game());
+  const kickoff = NOW + 3 * 3600;
+  assert.equal((await pricer.getPrice({ ...wings, claimDeadline: "start" })).claimDeadline, kickoff);
+  assert.equal((await pricer.getPrice({ ...wings, claimDeadline: "30min" })).claimDeadline, kickoff - 1800);
+  assert.equal((await pricer.getPrice({ ...wings, claimDeadline: kickoff - 600 })).claimDeadline, kickoff - 600);
+  await refusal(pricer.getPrice({ ...wings, claimDeadline: kickoff + 1 }), "deadline-too-late");
+});
+
+test("getPrice_gameThatHasStarted_isRefused", async () => {
+  const { pricer, clock } = setup(game());
+  clock.now = NOW + 3 * 3600;
+  await refusal(pricer.getPrice(wings), "event-started");
+  clock.now = NOW + 3 * 3600 - 29;
+  await refusal(pricer.getPrice(wings), "too-close");
+  clock.now = NOW + 3 * 3600 - 30;
+  assert.equal((await pricer.getPrice(wings)).limit, "ok");
+});
+
+test("getPrice_intervalMarket_isQuotableWhileRunning_until60SecondsBeforeItCloses", async () => {
+  // The window is running: it started 100 seconds ago and closes in 200.
+  const { pricer, clock } = setup(window5m(200));
+  const p = await pricer.getPrice(btc);
+  assert.equal(p.claimDeadline, NOW + 140);
+  assert.equal(p.marketCloseTime, NOW + 200);
+  await refusal(pricer.getPrice({ ...btc, claimDeadline: NOW + 141 }), "deadline-too-late");
+  clock.now = NOW + 140;
+  await refusal(pricer.getPrice(btc), "event-started");
+});
+
+test("getPrice_refusesWhatItCannotPrice", async () => {
+  await refusal(setup(null).pricer.getPrice(wings), "unknown-event");
+  await refusal(setup(game()).pricer.getPrice({ ...wings, instrumentSymbol: "GEMI-NFL-2610251700-IND-MIN-M-IND" }), "unknown-contract");
+  await refusal(setup(game({ status: "settled" })).pricer.getPrice(wings), "market-closed");
+  const noAsk = game();
+  noAsk.contracts[0]!.prices = { bestBid: "0.38" };
+  await refusal(setup(noAsk).pricer.getPrice(wings), "no-price");
+  await refusal(setup(game(), { paused: true }).pricer.getPrice(wings), "vault-paused");
+  await refusal(setup(game()).pricer.getPrice({ ...wings, maxClaims: 0 }), "bad-request");
+  await refusal(setup(game()).pricer.getPrice({ ...wings, payoutPerClaim: 0n }), "bad-request");
+});
+
+test("getPrice_noAsk_fallsBackToTheLastTrade", async () => {
+  const event = game();
+  event.contracts[0]!.prices = { lastTradePrice: "0.41" };
+  assert.equal((await setup(event).pricer.getPrice(wings)).breakdown.chance, 0.41);
+});
+
+test("signQuote_overCapacity_saysHowManyCustomersFit", async () => {
+  const { pricer } = setup(game());
+  const err = await refusal(pricer.signQuote({ ...wings, maxClaims: 305, merchant: MERCHANT }), "over-capacity");
+  assert.equal(err.maxCustomers, 304);
+  assert.equal(err.message, "We can cover up to 304 customers on this game right now.");
+  // The unsigned price for the same request is not an error: it reports the limit.
+  const p = await pricer.getPrice({ ...wings, maxClaims: 305 });
+  assert.equal(p.limit, "exposure");
+  assert.equal(p.maxCustomers, 304);
+});
+
+test("signQuote_tooLikely_isRefused", async () => {
+  const event = game();
+  event.contracts[0]!.prices = { bestAsk: "0.97" };
+  await refusal(setup(event).pricer.signQuote({ ...wings, maxClaims: 1, merchant: MERCHANT }), "too-likely");
+});
+
+test("signQuote_hedgeMode_needsExactlyOneClaim", async () => {
+  const { pricer } = setup(game());
+  await refusal(pricer.signQuote({ ...wings, hedgeMode: true, merchant: MERCHANT }), "bad-request");
+  const res = await pricer.signQuote({ ...wings, maxClaims: 1, hedgeMode: true, merchant: MERCHANT });
+  assert.equal(res.quote.hedgeMode, true);
+});
+
+test("signQuote_liveQuotes_countUntilTheyExpireOrAreUsed", async () => {
+  const { pricer, clock, state } = setup(game());
+  // 280 customers fit once. A second quote for 280 does not: the first may still become a promo.
+  const big = { ...wings, maxClaims: 280, merchant: MERCHANT };
+  const first = await pricer.signQuote(big);
+  const err = await refusal(pricer.signQuote(big), "over-capacity");
+  assert.ok(err.maxCustomers! < 280 && err.maxCustomers! > 0);
+
+  // Once the first quote has expired unused, the room is back.
+  clock.now += 91;
+  const second = await pricer.signQuote(big);
+
+  // The second quote is used on chain: it is in the balance and the lock now, and is not counted twice.
+  state.used.add(second.quote.nonce);
+  state.balance += BigInt(second.quote.premium);
+  state.locked += 280n * 20n * USDC;
+  const after = await pricer.getPrice({ ...wings, maxClaims: 1 });
+  assert.equal(after.maxCustomers, err.maxCustomers);
+  assert.notEqual(first.quote.nonce, second.quote.nonce);
+});
+
+test("signQuote_requestsAtTheSameTime_cannotBothTakeTheSameRoom", async () => {
+  const { pricer } = setup(game());
+  const big = { ...wings, maxClaims: 280, merchant: MERCHANT };
+  const results = await Promise.allSettled([pricer.signQuote(big), pricer.signQuote(big)]);
+  assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+});

@@ -1,0 +1,29 @@
+{
+  "name": "freeif-keeper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "FreeIf keeper: pricing API, claim relayer and settlement loop for PromoVault on Arc testnet",
+  "license": "MIT",
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "dev": "node --watch src/main.ts",
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "abi": "node scripts/gen-abi.mjs",
+    "e2e": "node scripts/e2e.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.7",
+    "hono": "^4.13.18",
+    "viem": "^2.57.18"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}
