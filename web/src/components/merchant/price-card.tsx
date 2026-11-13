@@ -170,8 +170,8 @@ function HowSheet({ open, onClose, price, mechanics }: { open: boolean; onClose:
         <dl className="num mt-5 space-y-1.5 border-t border-dashed border-line pt-4 text-[13px]">
           <Fact label="Source" value="Gemini Prediction Markets API" />
           <Fact label="Instrument" value={price.instrumentSymbol} />
-          <Fact label="Best ask" value={`${m.bestAsk ?? "none"} · bid ${m.bestBid ?? "none"} · ${timeOf(m.askFetchedAt)}`} />
-          <Fact label="Spread" value={`${m.spreadBps} bps · loading ${usd(m.loading)}`} />
+          <Fact label="Best ask" value={`${m.bestAsk ?? "none"} · bid ${m.bestBid ?? "none"} · last trade ${m.lastTradePrice ?? "none"} · ${timeOf(m.askFetchedAt)}`} />
+          <Fact label="Spread" value={`${m.spreadBps} bps${m.thin ? " (thin book: priced on the highest price it shows)" : ""} · loading ${usd(m.loading)}`} />
           <Fact label="Quote" value={`signed by pricer ${shortAddress(m.pricer)}, valid ${m.quoteTtlSeconds} s`} />
           <Fact label="On pay" value={`${usd(b.mostOwed)} is locked on Arc until the result`} />
           <Fact label="Rule" value={capitalize(price.rule)} />

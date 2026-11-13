@@ -69,7 +69,10 @@ export type Price = {
     bestBid: string | null;
     lastTradePrice: string | null;
     askFetchedAt: number;
+    /** The spread this price carries: the usual one, or the wider one of a thin book. */
     spreadBps: number;
+    /** True when the book is not a market (a side is missing, or its sides are far apart). */
+    thin?: boolean;
     loading: string;
     utilizationBps: number;
     maxLockedBps: number;
