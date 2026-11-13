@@ -5,7 +5,7 @@
 // keeper), the page shows its line at once and reads the promo again. A timer reads the promo as well,
 // so a page whose connection dropped is never more than a few seconds behind.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { KEEPER_URL } from "./config";
+import { follow } from "./events";
 import { keeper, KeeperError, type FeedEvent, type Promo } from "./keeper";
 
 const FINISHED = new Set(["PaidOut", "FinalizedNo", "Voided"]);
@@ -79,26 +79,27 @@ export function usePromo(id: string, customer: string | null = null): LivePromo 
 
   // The event stream. A promo that is over has no more events.
   useEffect(() => {
-    if (finished || typeof EventSource === "undefined") return;
-    const source = new EventSource(`${KEEPER_URL}/promos/${encodeURIComponent(id)}/events`);
+    if (finished) return;
     let again: number[] = [];
-    source.addEventListener("ready", () => setConnected(true));
-    source.addEventListener("vault", (message) => {
-      let event: FeedEvent;
-      try {
-        event = JSON.parse((message as MessageEvent<string>).data) as FeedEvent;
-      } catch {
-        return;
-      }
-      // The line shows at once; the promo's numbers follow from the reads.
-      setPromo((held) => (held ? withEvents(held, [event]) : held));
-      again.forEach((timer) => window.clearTimeout(timer));
-      again = AFTER_AN_EVENT_MS.map((ms) => window.setTimeout(() => void load(), ms));
+    const close = follow(`/promos/${encodeURIComponent(id)}/events`, {
+      onReady: () => setConnected(true),
+      onEvent: (data) => {
+        let event: FeedEvent;
+        try {
+          event = JSON.parse(data) as FeedEvent;
+        } catch {
+          return;
+        }
+        // The line shows at once; the promo's numbers follow from the reads.
+        setPromo((held) => (held ? withEvents(held, [event]) : held));
+        again.forEach((timer) => window.clearTimeout(timer));
+        again = AFTER_AN_EVENT_MS.map((ms) => window.setTimeout(() => void load(), ms));
+      },
+      // Until the stream is back, the timer above reads every few seconds.
+      onDown: () => setConnected(false),
     });
-    // The browser reconnects by itself; until it has, the timer above reads every few seconds.
-    source.onerror = () => setConnected(false);
     return () => {
-      source.close();
+      close();
       again.forEach((timer) => window.clearTimeout(timer));
     };
   }, [id, finished, load]);

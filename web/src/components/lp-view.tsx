@@ -8,7 +8,8 @@ import { useCallback, useEffect, useState } from "react";
 import { SiteFooter } from "@/components/mechanics";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { explorerAddress, explorerTx, FEE_BUFFER, KEEPER_URL } from "@/lib/config";
+import { explorerAddress, explorerTx, FEE_BUFFER } from "@/lib/config";
+import { follow } from "@/lib/events";
 import { dayTime, parseDollars, shortAddress, usd } from "@/lib/format";
 import { connect, connected, deposit, injected, onAccount, position, withdraw, type Position } from "@/lib/injected";
 import { keeper, type FeedEvent, type Vault, type VaultPromo } from "@/lib/keeper";
@@ -53,17 +54,20 @@ function useVault(): { vault: Vault | null; failed: boolean; reload: () => Promi
     void load(controller.signal);
     const timer = window.setInterval(() => void load(controller.signal), 15_000);
     let again: number | undefined;
-    const source = typeof EventSource === "undefined" ? null : new EventSource(`${KEEPER_URL}/events`);
-    // Several events in one block arrive together and share one read.
-    source?.addEventListener("vault", () => {
-      window.clearTimeout(again);
-      again = window.setTimeout(() => void load(controller.signal), 300);
+    const close = follow("/events", {
+      onReady: () => undefined,
+      // Several events in one block arrive together and share one read.
+      onEvent: () => {
+        window.clearTimeout(again);
+        again = window.setTimeout(() => void load(controller.signal), 300);
+      },
+      onDown: () => undefined,
     });
     return () => {
       controller.abort();
       window.clearInterval(timer);
       window.clearTimeout(again);
-      source?.close();
+      close();
     };
   }, [load]);
 
