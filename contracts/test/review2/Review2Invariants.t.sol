@@ -380,7 +380,8 @@ contract Review2Handler is Test {
         if (callerSeed % 6 == 1) caller = p.merchant;
         if (callerSeed % 6 == 2 && callerSeed % 5 == 0) caller = owner;
 
-        bool legal = caller == relayer && !vault.paused() && p.status == PromoVault.Status.Open
+        // Paused or not: since v2 a pause does not block claims.
+        bool legal = caller == relayer && p.status == PromoVault.Status.Open
             && block.timestamp < p.claimDeadline && p.claimCount < p.maxClaims && payee != address(0)
             && !vault.hasClaim(id, payee);
 

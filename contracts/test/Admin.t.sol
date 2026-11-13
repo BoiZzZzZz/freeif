@@ -119,6 +119,51 @@ contract AdminTest is VaultTest {
         _deposit(bob, 10 * USDC);
     }
 
+    /// v2: the pause blocks exactly the three calls that bring new money or new risk, deposit and
+    /// the two creates, and not registerClaim, whose payout the promo already locked.
+    function test_pause_blocksDepositAndBothCreates_butNotRegisterClaim() public {
+        _deposit(alice, 10_000 * USDC);
+        uint256 open = _createPromo(20 * USDC, 3, 24 * USDC);
+
+        PromoVault.Quote memory q1 = _quote(20 * USDC, 3, 24 * USDC);
+        _fund(q1);
+        bytes memory sig1 = _sign(q1);
+        PromoVault.Quote memory q2 = _quote(20 * USDC, 3, 24 * USDC);
+        usdc.mint(merchant, q2.premium);
+        bytes memory sig2 = _sign(q2);
+        uint256 permitDeadline = block.timestamp + 10 minutes;
+        (uint8 v, bytes32 r, bytes32 s) = _signPermit(merchantPk, q2.premium, permitDeadline);
+        usdc.mint(bob, 10 * USDC);
+        vm.prank(bob);
+        usdc.approve(address(vault), 10 * USDC);
+
+        vault.pause();
+
+        vm.prank(bob);
+        vm.expectRevert(PromoVault.VaultPaused.selector);
+        vault.deposit(10 * USDC);
+        vm.prank(merchant);
+        vm.expectRevert(PromoVault.VaultPaused.selector);
+        vault.createPromo(q1, sig1);
+        vm.prank(merchant);
+        vm.expectRevert(PromoVault.VaultPaused.selector);
+        vault.createPromoWithPermit(q2, sig2, permitDeadline, v, r, s);
+        assertEq(vault.promoCount(), 1);
+
+        vm.prank(relayer);
+        vault.registerClaim(open, bob);
+        assertTrue(vault.hasClaim(open, bob));
+
+        vault.unpause();
+        vm.prank(bob);
+        vault.deposit(10 * USDC);
+        vm.prank(merchant);
+        vault.createPromo(q1, sig1);
+        vm.prank(merchant);
+        vault.createPromoWithPermit(q2, sig2, permitDeadline, v, r, s);
+        assertEq(vault.promoCount(), 3);
+    }
+
     /// A pause must never trap LP funds.
     function test_pause_doesNotBlockWithdraw() public {
         uint256 aliceShares = _deposit(alice, 100 * USDC);

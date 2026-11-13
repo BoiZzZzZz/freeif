@@ -8,7 +8,7 @@ Deployed and verified on Arc testnet (chain 5042002): [`0x68a00243927f250dBcD916
 git submodule update --init                                 # once after cloning, from the repo's root: forge-std and OpenZeppelin
 forge build
 forge test                                                  # everything, about a minute (nearly all of it the two invariant runs)
-forge test --no-match-contract PromoVaultInvariantTest      # the 238 unit and fuzz tests, about 2 seconds (it leaves out both invariant contracts)
+forge test --no-match-contract PromoVaultInvariantTest      # the 248 unit and fuzz tests, about 2 seconds (it leaves out both invariant contracts)
 ```
 
 Solidity 0.8.28, evm version cancun, optimizer 200 runs, `via_ir` off. OpenZeppelin Contracts v5.7.0 (`EIP712`, `ECDSA`, `SafeERC20`).
@@ -19,7 +19,7 @@ Solidity 0.8.28, evm version cancun, optimizer 200 runs, `via_ir` off. OpenZeppe
 - A merchant opens a promo with a quote signed by the pricer key (`createPromo`, or `createPromoWithPermit` with an EIP-2612 permit for exactly the premium). The whole payout is locked from that moment.
 - The promo's claim signer registers customers (`registerClaim`) until the claim deadline. A quote with `hedgeMode` makes the merchant the one claimant, in the creating transaction.
 - The oracle key posts the result (`settle`). After the dispute window anyone can `finalize` it, and anyone can pay the customers of a "yes" (`payoutBatch`). A transfer that fails is set aside and sent later (`retryPayout`).
-- The owner can `veto` a result inside the window (then `resetSettlement`), `voidPromo` a promo with no standing result after a grace period (the premium is refunded), pause new money and new risk, and set the keys and limits.
+- The owner can `veto` a result inside the window (then `resetSettlement`), `voidPromo` a promo with no standing result after a grace period (the premium is refunded), pause new deposits and new promos, and set the keys and limits. A pause blocks only `deposit`, `createPromo` and `createPromoWithPermit`: since v2 it no longer blocks `registerClaim`, because a promo locks every claim's payout when it is created, so claims on promos already open, withdrawals, settlement and payouts all go on.
 
 ## Tests
 
@@ -28,12 +28,12 @@ Solidity 0.8.28, evm version cancun, optimizer 200 runs, `via_ir` off. OpenZeppe
 | `test/VaultTest.sol` | The shared base: a test pricer key, the EIP-712 digest built by hand, helpers |
 | `test/Liquidity.t.sol` | Deposit, withdraw, the lock, and deposit pricing while promos are pending |
 | `test/CreatePromo.t.sol` | Quotes, the exposure cap, hedge mode, and the permit path |
-| `test/Claims.t.sol` | Who may register a customer, and until when |
+| `test/Claims.t.sol` | Who may register a customer, and until when, paused or not |
 | `test/Settlement.t.sol` | Settle, veto, reset, finalize |
 | `test/Void.t.sol` | Voiding and the refund |
 | `test/Payout.t.sol` | Batches, a transfer that fails, the retry |
-| `test/Admin.t.sol` | The owner's settings and the pause |
+| `test/Admin.t.sol` | The owner's settings, and which calls the pause blocks |
 | `test/Invariants.t.sol` | A handler that makes random legal calls, and five invariants checked after each one, the first being `balance >= lockedCollateral` |
-| `test/review2/Review2.t.sol` | The second review's tests (Nov 13). `test_finding_...` shows with numbers an outcome the review reported (a quote held open on a running market, fixed in the keeper; a pause over a claim window); `test_note_...` shows behavior that is by design but worth knowing. The rest: covers (hedge mode) through a veto, a void, a blocklist and a pause, encoding and overflow, rounding, the constructor's zero-address checks, payout gas limits |
+| `test/review2/Review2.t.sol` | The second review's tests (Nov 13). `test_finding_...` shows with numbers an outcome the review reported (a quote held open on a running market, fixed in the keeper); the second finding, a pause over a claim window, is fixed in v2 and its test now shows the customer registered and paid while paused; `test_note_...` shows behavior that is by design but worth knowing. The rest: covers (hedge mode) through a veto, a void, a blocklist and a pause, encoding and overflow, rounding, the constructor's zero-address checks, payout gas limits |
 | `test/review2/Review2Invariants.t.sol` | A second invariant harness, with its own model of which calls must go through and which must be refused, checked both ways on every call. One address can play every role. Three invariants, and seven fixed walks of 600 calls each |
 | `test/mocks/MockUSDC.sol` | A 6-decimal token with `permit` and a blocklist |
