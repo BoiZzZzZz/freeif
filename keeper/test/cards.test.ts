@@ -84,6 +84,8 @@ function setup(opts: { cardsFrom?: bigint; testKey?: string; limits?: Partial<Li
     /** Every token Circle was asked about. */
     asked: [] as string[],
     reads: 0,
+    /** Every address the relayer looked up on the chain before registering it. */
+    checked: [] as string[],
   };
   // While held, a transaction waits: the cards stay in the relayer's line until `release`.
   let gate: Promise<void> = Promise.resolve();
@@ -110,7 +112,10 @@ function setup(opts: { cardsFrom?: bigint; testKey?: string; limits?: Partial<Li
     readContract: async ({ functionName, args }: { functionName: string; args?: readonly unknown[] }) => {
       if (functionName === "promoCount") return BigInt(promos.length);
       if (functionName === "getPromo") return { ...promos[Number(args![0])]! };
-      if (functionName === "hasClaim") return has(args![0] as bigint, args![1] as string);
+      if (functionName === "hasClaim") {
+        state.checked.push(args![1] as string);
+        return has(args![0] as bigint, args![1] as string);
+      }
       throw new Error(`unexpected read ${functionName}`);
     },
     getBlock: async () => ({ timestamp: BigInt(NOW) }),
@@ -386,6 +391,8 @@ test("cards_whenThePromoClosesMidway_theRestAreSkippedWithoutACall", async (t) =
   assert.equal((await send(1, asMerchant([C1, C2, C3]))).status, 202);
   await relayer.drained();
   assert.deepEqual(state.sent, [`1:${C1}`]);
+  // The second card found the promo closed; the third was dropped without a call to the chain.
+  assert.deepEqual(state.checked, [C1, C2]);
   assert.deepEqual(relayer.queuedCards(1n), []);
 });
 
