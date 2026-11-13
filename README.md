@@ -106,7 +106,7 @@ flowchart TB
 | No more than 60% of the vault may be locked, counting quotes that are signed and still usable | The pricing service | Many promos doing it together. The contract has no cap across promos |
 | The premium may not exceed the payout | Both | Selling a result that is nearly certain |
 
-**Collateral.** `lockedCollateral` is the sum of every promo's lock plus payouts that failed and wait. Every function that moves USDC keeps `balance >= lockedCollateral`, and a withdrawal is priced on `balance - lockedCollateral`, so a liquidity provider leaving can never reach a promo's payout. This is the property the tests lean on hardest: 215 unit and fuzz tests, and a stateful invariant run that makes random legal calls and checks it after every one.
+**Collateral.** `lockedCollateral` is the sum of every promo's lock plus payouts that failed and wait. Every function that moves USDC keeps `balance >= lockedCollateral`, and a withdrawal is priced on `balance - lockedCollateral`, so a liquidity provider leaving can never reach a promo's payout. This is the property the tests lean on hardest: 238 unit and fuzz tests, and two stateful invariant runs, each with its own handler (the second written in a review before the contract freeze), that make random calls and check it after every one.
 
 **Shares.** Liquidity providers hold proportional shares, and there are two prices.
 

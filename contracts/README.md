@@ -7,8 +7,8 @@ Deployed and verified on Arc testnet (chain 5042002): [`0x68a00243927f250dBcD916
 ```
 git submodule update --init                                 # once after cloning, from the repo's root: forge-std and OpenZeppelin
 forge build
-forge test                                                  # everything, about 35 seconds (nearly all of it the invariant run)
-forge test --no-match-contract PromoVaultInvariantTest      # the 215 unit and fuzz tests, about 2 seconds
+forge test                                                  # everything, about a minute (nearly all of it the two invariant runs)
+forge test --no-match-contract PromoVaultInvariantTest      # the 238 unit and fuzz tests, about 2 seconds (it leaves out both invariant contracts)
 ```
 
 Solidity 0.8.28, evm version cancun, optimizer 200 runs, `via_ir` off. OpenZeppelin Contracts v5.7.0 (`EIP712`, `ECDSA`, `SafeERC20`).
@@ -34,4 +34,6 @@ Solidity 0.8.28, evm version cancun, optimizer 200 runs, `via_ir` off. OpenZeppe
 | `test/Payout.t.sol` | Batches, a transfer that fails, the retry |
 | `test/Admin.t.sol` | The owner's settings and the pause |
 | `test/Invariants.t.sol` | A handler that makes random legal calls, and five invariants checked after each one, the first being `balance >= lockedCollateral` |
+| `test/review2/Review2.t.sol` | The second review's tests (Nov 13). `test_finding_...` shows with numbers an outcome the review reported (a quote held open on a running market, fixed in the keeper; a pause over a claim window); `test_note_...` shows behavior that is by design but worth knowing. The rest: covers (hedge mode) through a veto, a void, a blocklist and a pause, encoding and overflow, rounding, the constructor's zero-address checks, payout gas limits |
+| `test/review2/Review2Invariants.t.sol` | A second invariant harness, with its own model of which calls must go through and which must be refused, checked both ways on every call. One address can play every role. Three invariants, and seven fixed walks of 600 calls each |
 | `test/mocks/MockUSDC.sol` | A 6-decimal token with `permit` and a blocklist |
