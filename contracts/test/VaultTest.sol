@@ -56,6 +56,9 @@ abstract contract VaultTest is Test {
         uint64 settledAt
     );
 
+    event Vetoed(uint256 indexed promoId);
+    event SettlementReset(uint256 indexed promoId);
+
     function setUp() public virtual {
         (pricer, pricerPk) = makeAddrAndKey("pricer");
         usdc = new MockUSDC();

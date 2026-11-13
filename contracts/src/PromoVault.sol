@@ -121,6 +121,8 @@ contract PromoVault is EIP712 {
         string resolutionSide,
         uint64 settledAt
     );
+    event Vetoed(uint256 indexed promoId);
+    event SettlementReset(uint256 indexed promoId);
     event PricerSet(address indexed pricer);
     event OracleSet(address indexed oracle);
     event MaxExposureBpsSet(uint16 bps);
@@ -155,6 +157,7 @@ contract PromoVault is EIP712 {
     error AlreadyClaimed(address customer);
     error ClaimsStillOpen(uint64 claimDeadline);
     error EventIdMismatch();
+    error DisputeWindowOver(uint256 windowEnd);
 
     // ---------------------------------------------------------------- setup
 
@@ -376,6 +379,39 @@ contract PromoVault is EIP712 {
         p.status = Status.Settled;
 
         emit Settled(promoId, outcomeYes, geminiEventIdPlain, resolutionSide, uint64(block.timestamp));
+    }
+
+    /// @notice Reject a posted result. Only while its dispute window is running.
+    /// @dev The promo keeps its full lock. From here the owner either calls resetSettlement so
+    ///      the oracle can post again, or voids the promo once the void grace period has passed.
+    function veto(uint256 promoId) external onlyOwner {
+        Promo storage p = _promo(promoId);
+        if (p.status != Status.Settled) revert WrongStatus(p.status);
+        uint256 windowEnd = _disputeWindowEnd(p);
+        if (block.timestamp >= windowEnd) revert DisputeWindowOver(windowEnd);
+
+        p.status = Status.Vetoed;
+
+        emit Vetoed(promoId);
+    }
+
+    /// @notice Clear a vetoed result and reopen the promo for the oracle to settle again.
+    /// @dev Claims do not reopen: the claim deadline has already passed.
+    function resetSettlement(uint256 promoId) external onlyOwner {
+        Promo storage p = _promo(promoId);
+        if (p.status != Status.Vetoed) revert WrongStatus(p.status);
+
+        p.status = Status.Open;
+        p.outcomeYes = false;
+        p.settledAt = 0;
+
+        emit SettlementReset(promoId);
+    }
+
+    /// @dev The first moment a settled promo can be finalized, and the first moment a veto is
+    ///      too late. Uses the current disputeWindow, not the one in force when it was settled.
+    function _disputeWindowEnd(Promo storage p) internal view returns (uint256) {
+        return uint256(p.settledAt) + disputeWindow;
     }
 
     // ---------------------------------------------------------------- admin

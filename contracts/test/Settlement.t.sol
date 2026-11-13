@@ -159,3 +159,128 @@ contract SettleTest is SettlementBase {
         vault.registerClaim(promoId, bob);
     }
 }
+
+contract VetoTest is SettlementBase {
+    uint64 internal settledAt;
+
+    function setUp() public override {
+        super.setUp();
+        _settle(promoId, true);
+        settledAt = vault.getPromo(promoId).settledAt;
+    }
+
+    function test_veto_marksThePromoVetoedAndKeepsTheLock() public {
+        vm.expectEmit(address(vault));
+        emit Vetoed(promoId);
+        vault.veto(promoId);
+
+        _assertStatus(promoId, PromoVault.Status.Vetoed);
+        assertEq(vault.lockedCollateral(), MAX_PAYOUT);
+        assertEq(vault.getPromo(promoId).collateralLocked, MAX_PAYOUT);
+    }
+
+    function test_veto_worksInTheLastSecondOfTheWindow() public {
+        vm.warp(settledAt + vault.disputeWindow() - 1);
+        vault.veto(promoId);
+    }
+
+    function test_veto_revertsOnceTheWindowHasEnded() public {
+        uint256 windowEnd = settledAt + vault.disputeWindow();
+        vm.warp(windowEnd);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.DisputeWindowOver.selector, windowEnd));
+        vault.veto(promoId);
+    }
+
+    function test_veto_revertsForNonOwner() public {
+        address[4] memory callers = [oracle, merchant, relayer, alice];
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.prank(callers[i]);
+            vm.expectRevert(PromoVault.NotOwner.selector);
+            vault.veto(promoId);
+        }
+    }
+
+    function test_veto_revertsUnlessSettled() public {
+        uint256 open = _createPromo(PAYOUT, MAX_CLAIMS, PREMIUM);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.Open));
+        vault.veto(open);
+
+        vault.veto(promoId);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.Vetoed));
+        vault.veto(promoId);
+    }
+
+    function test_veto_revertsForAnUnknownPromo() public {
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.UnknownPromo.selector, 9));
+        vault.veto(9);
+    }
+
+    function test_veto_worksWhilePaused() public {
+        vault.pause();
+        vault.veto(promoId);
+        _assertStatus(promoId, PromoVault.Status.Vetoed);
+    }
+
+    /// A vetoed result cannot be posted over: the owner has to reset it first.
+    function test_settle_revertsWhileVetoed() public {
+        vault.veto(promoId);
+
+        vm.prank(oracle);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.Vetoed));
+        vault.settle(promoId, false, EVENT_ID_PLAIN, "no");
+    }
+
+    function test_resetSettlement_reopensThePromoForTheOracle() public {
+        vault.veto(promoId);
+
+        vm.expectEmit(address(vault));
+        emit SettlementReset(promoId);
+        vault.resetSettlement(promoId);
+
+        PromoVault.Promo memory p = vault.getPromo(promoId);
+        _assertStatus(promoId, PromoVault.Status.Open);
+        assertFalse(p.outcomeYes);
+        assertEq(p.settledAt, 0);
+        assertEq(p.collateralLocked, MAX_PAYOUT);
+        assertEq(p.claimCount, 3);
+        assertEq(vault.lockedCollateral(), MAX_PAYOUT);
+    }
+
+    /// The whole dispute path: wrong result, veto, reset, the right result, a new window.
+    function test_resetSettlement_thenTheOracleSettlesAgainWithANewWindow() public {
+        vault.veto(promoId);
+        vault.resetSettlement(promoId);
+
+        vm.warp(block.timestamp + 2 hours);
+        _settle(promoId, false);
+
+        PromoVault.Promo memory p = vault.getPromo(promoId);
+        _assertStatus(promoId, PromoVault.Status.Settled);
+        assertFalse(p.outcomeYes);
+        assertEq(p.settledAt, block.timestamp);
+        // The new result can be vetoed too.
+        vault.veto(promoId);
+    }
+
+    /// Resetting does not reopen claims: the deadline has passed.
+    function test_resetSettlement_doesNotReopenClaims() public {
+        vault.veto(promoId);
+        vault.resetSettlement(promoId);
+
+        vm.prank(relayer);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.ClaimsClosed.selector, claimDeadline));
+        vault.registerClaim(promoId, bob);
+    }
+
+    function test_resetSettlement_revertsUnlessVetoed() public {
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.Settled));
+        vault.resetSettlement(promoId);
+    }
+
+    function test_resetSettlement_revertsForNonOwner() public {
+        vault.veto(promoId);
+        vm.prank(oracle);
+        vm.expectRevert(PromoVault.NotOwner.selector);
+        vault.resetSettlement(promoId);
+    }
+}
