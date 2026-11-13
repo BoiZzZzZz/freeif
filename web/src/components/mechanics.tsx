@@ -2,6 +2,7 @@
 
 // The mechanics view (prep/WIREFRAMES.md section 11): one switch that shows what is under the
 // merchant's words. Off by default; `?mechanics=1` in a link turns it on.
+import Link from "next/link";
 import { useEffect } from "react";
 import { KEYS, saveLocal, useLocal } from "@/lib/local";
 
@@ -32,6 +33,12 @@ export function SiteFooter() {
       <button className="underline underline-offset-2" onClick={() => saveLocal(KEYS.mechanics, on ? null : "1")}>
         {on ? "Hide how it works under the hood" : "See how it works under the hood"}
       </button>
+      {/* The vault's own page speaks DeFi, so it is offered with the mechanics, not to a merchant. */}
+      {on && (
+        <Link className="ml-4 underline underline-offset-2" href="/lp">
+          The vault behind the promos
+        </Link>
+      )}
     </footer>
   );
 }

@@ -6,16 +6,17 @@ The FreeIf app: Next.js 16 (App Router), React 19, Tailwind 4, viem, `qrcode.rea
 |---|---|
 | `/merchant` | A shop owner sets up a promo: a game and a team, what is free, how many customers, the live cost, Pay |
 | `/claim/[promoId]` | A customer at the counter scans the code, types an email and a 6-digit code, and is covered |
-| `/promo/[id]` | The merchant's dashboard and the public status page: one status sentence, three numbers, the counter code, a feed, proof |
+| `/promo/[id]` | The merchant's dashboard and the public status page: one status sentence, three numbers, the counter code, a live feed, proof |
 | `/promo/[id]/print` | The counter sign with the code, printed from the browser |
 
-`/lp` (liquidity providers) is not built yet.
+| `/lp` | A liquidity provider: what the vault holds, how much of it is locked, what it has earned, both share prices, deposit and withdraw, every promo with what it locks and what it made, the risks, and the vault's activity |
 
-Merchant and customer screens never say prediction market, USDC, wallet or gas. The footer link "See how it works under the hood" (or `?mechanics=1` in a link) turns on the mechanics view, which shows where each number comes from.
+Merchant and customer screens never say prediction market, USDC, wallet or gas. `/lp` is the one page that does, and the one page that uses a browser wallet (MetaMask and the like) instead of the email login. The footer link "See how it works under the hood" (or `?mechanics=1` in a link) turns on the mechanics view, which shows where each number comes from.
 
 ## How it talks to the rest
 
 - **The keeper** (`../keeper`, API in its README) is called from the browser: the game list, the live price, the signed quote, the claim (with the customer's login token, which the keeper checks with Circle), and the promo's status. Names such as "the Lions win" come from the keeper, built from Gemini's data.
+- **Live pages.** `/promo/[id]` and `/claim/[promoId]` keep the keeper's event stream open (`GET /promos/:id/events`, server-sent events). When an event on the promo reaches the keeper, from the QuickNode Stream or from the keeper's own read of the chain, its line is on the page at once and the page reads the promo again (three reads: at once, after 1.5 seconds, after 5). A timer reads the promo as well, every 15 seconds while the stream is open and every 4 while it is not, so a dropped connection costs seconds. The feed is the promo's events on the vault; in the mechanics view each line says how the event reached the keeper and how long after its block.
 - **Circle** is called from this app's server, because those calls need the API key. Everything a user does is a "challenge": a route under `/api/wallet` asks Circle for one with the user's token, and Circle's SDK in the browser shows its own window for it.
 
 | Route | What it does |
@@ -28,6 +29,12 @@ Merchant and customer screens never say prediction market, USDC, wallet or gas. 
 | `POST /api/wallet/tx` | Where that transaction is, and the promo's id once it is in a block |
 
 Paying for a promo is one transaction from the merchant's account: the account signs a permit for exactly the cost, and `createPromoWithPermit` spends it. No standing approval is left. The permit and the call are built on the server (`src/lib/server/promo-call.ts`), so these routes cannot be used to have an account sign or send anything else.
+
+## The vault page
+
+`/lp` reads `GET /vault` from the keeper (one read of the chain, shared) and keeps `GET /events` open, so the numbers move when something happens on the vault. A deposit is up to two confirmations in the wallet (an approval for exactly the amount, then `deposit`); a withdrawal is one (`withdraw`). Both calls are simulated against the chain before the wallet is asked.
+
+The page shows two share prices because the vault has two. A deposit is priced on what is available plus the locks of promos still running, the most the shares can be worth. A withdrawal is priced on what is available alone, the least. They differ whenever a promo is open, so before a withdrawal the page says how much is received and how much "stays behind in open promos": that part goes to the providers who stay if those promos end "no".
 
 ## Run it
 
@@ -63,8 +70,10 @@ On Vercel the two Circle values are project variables. On a developer machine th
 | `src/components/receipt-card.tsx` | The ticket: one component with a state, on every page |
 | `src/components/merchant/` | The game picker, the price card and the Pay sheet |
 | `src/components/claim-view.tsx`, `promo-view.tsx`, `print-view.tsx` | The three promo pages |
+| `src/components/lp-view.tsx`, `src/lib/injected.ts` | The vault page, and the browser wallet it uses |
 | `src/lib/wallet.tsx` | The login and Circle's challenges, as a React provider |
 | `src/lib/keeper.ts` | The keeper's API and its types |
+| `src/lib/use-promo.ts` | One promo, kept current: the keeper's event stream, and the timer behind it |
 | `src/lib/promo.ts`, `format.ts` | A promo in words; money and times as people read them |
 | `src/lib/server/` | Circle's API, the chain reads, the permit and the promo call |
 | `src/lib/abi.ts` | Copied from the keeper |

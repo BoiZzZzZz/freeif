@@ -129,8 +129,11 @@ export type FeedEvent = {
   seenAt: number;
   customer?: string;
   merchant?: string;
-  /** Base units: the cost, the payout, the refund, by event. */
+  /** The liquidity provider, on a deposit or a withdrawal. */
+  lp?: string;
+  /** Base units: the cost, the payout, the refund, the deposit, by event. */
   amount?: string;
+  shares?: string;
   claimCount?: number;
   outcomeYes?: boolean;
 };
@@ -169,6 +172,56 @@ export type Promo = {
   /** The QuickNode Stream's record: deliveries so far, and when the last one came (unix seconds). */
   stream: { deliveries: number; lastDeliveryAt: number | null };
   customer: { address: string; number: number | null; paid: boolean; owed: string } | null;
+};
+
+/** One promo as the vault's books have it (`GET /vault`). */
+export type VaultPromo = {
+  promoId: string;
+  status: PromoStatus;
+  item: string | null;
+  business: string | null;
+  game: string | null;
+  condition: string | null;
+  premium: string;
+  /** The most it can pay: what was locked when it was made. */
+  maxPayout: string;
+  /** What it still locks now. */
+  locked: string;
+  payoutPerClaim: string;
+  claimCount: number;
+  maxClaims: number;
+  claimDeadline: number;
+  marketCloseTime: number;
+  settledAt: number;
+  outcomeYes: boolean;
+  /** What the vault made on it: the premium less what its customers get. Null until it has a final result. */
+  net: string | null;
+};
+
+/** The vault as a liquidity provider reads it. Amounts are USDC base units; shares have six decimals too. */
+export type Vault = {
+  vault: `0x${string}`;
+  usdc: `0x${string}`;
+  block: number;
+  balance: string;
+  locked: string;
+  /** The part of `locked` held by promos with no final result. */
+  pending: string;
+  owed: string;
+  /** `balance - locked`: what a withdrawal is priced on. */
+  free: string;
+  /** `free + pending`: what a deposit is priced on. */
+  depositBasis: string;
+  totalShares: string;
+  maxExposureBps: number;
+  maxLockedBps: number;
+  paused: boolean;
+  /** Seconds between a result being posted and it becoming final. */
+  disputeWindow: number;
+  netEarned: string;
+  promos: VaultPromo[];
+  /** The newest events on the vault, oldest first. */
+  events: FeedEvent[];
 };
 
 export type ClaimResult = {
@@ -242,6 +295,9 @@ export const keeper = {
 
   /** Covers `customer` on a promo. `userToken` is the login: the keeper asks Circle whose it is. */
   claim: (req: { promoId: string; customer: string; userToken: string }) => call<ClaimResult>("/claims", req),
+
+  /** The vault's books, every promo, and the newest events: the page for liquidity providers. */
+  vault: (signal?: AbortSignal) => call<Vault>("/vault", undefined, signal),
 
   promo: (id: string, customer?: string | null, signal?: AbortSignal) =>
     call<Promo>(`/promos/${encodeURIComponent(id)}${customer ? `?customer=${customer}` : ""}`, undefined, signal),
