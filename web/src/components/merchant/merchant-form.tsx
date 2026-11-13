@@ -8,6 +8,7 @@
 // if a day's high temperature lands in a range. It is the same contract with one claimant.
 import Link from "next/link";
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { CashOut } from "@/components/cash-out";
 import { GamePicker, type Pick } from "@/components/merchant/game-picker";
 import { PaySheet, type Order } from "@/components/merchant/pay-sheet";
 import { PriceCard, usePrice } from "@/components/merchant/price-card";
@@ -382,6 +383,9 @@ function YourPromos() {
   const mine = useLocal<MyPromo[]>(KEYS.promos, NO_PROMOS);
   const [promos, setPromos] = useState<Promo[]>([]);
   const [balance, setBalance] = useState<bigint | null>(null);
+  const [cashOut, setCashOut] = useState(false);
+  // Counts the times money has left, so the balance is read again after each.
+  const [sends, setSends] = useState(0);
   const now = useNow(30_000);
   const ids = mine
     .slice(0, 5)
@@ -410,7 +414,7 @@ function YourPromos() {
     return () => {
       live = false;
     };
-  }, [address]);
+  }, [address, sends]);
 
   if (promos.length === 0 && !address) return null;
   return (
@@ -420,9 +424,16 @@ function YourPromos() {
         {address && balance !== null && (
           <span className="text-[14px]">
             Balance <span className="num">{usd(balance)}</span>
+            {/* A business that was paid from a cover, or that added more than it used, takes it out here. */}
+            {balance > 0n && (
+              <button className="ml-3 underline underline-offset-2" onClick={() => setCashOut(true)}>
+                Cash out
+              </button>
+            )}
           </span>
         )}
       </div>
+      {address && <CashOut open={cashOut} onClose={() => setCashOut(false)} address={address} onSent={() => setSends((n) => n + 1)} />}
       {promos.map((p) => (
         <Link
           key={p.promoId}

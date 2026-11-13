@@ -27,8 +27,20 @@ Merchant and customer screens never say prediction market, USDC, wallet or gas. 
 | `POST /api/wallet/permit` | A challenge to sign a USDC permit for exactly the promo's cost, to the vault |
 | `POST /api/wallet/create-promo` | A challenge to send `createPromoWithPermit`, after the call is simulated |
 | `POST /api/wallet/tx` | Where that transaction is, and the promo's id once it is in a block |
+| `POST /api/wallet/cash-out` | A challenge to send part of the account's balance to an address its owner typed: always a plain USDC transfer from the account itself, checked and simulated first |
 
 Paying for a promo is one transaction from the merchant's account: the account signs a permit for exactly the cost, and `createPromoWithPermit` spends it. No standing approval is left. The permit and the call are built on the server (`src/lib/server/promo-call.ts`), so these routes cannot be used to have an account sign or send anything else.
+
+Cash out is the one other thing an account sends. A customer who was paid has "Cash out" under their balance, and a merchant has it next to theirs: a sheet with one field, an address, and a button that sends the balance less five cents (the account pays its own network fee from the same money). The transfer is built on the server (`src/lib/server/cash-out.ts`): it is refused when the address is not one, is the account's own, or is the token or the vault, and when the account does not hold the amount. It needs the login of the account that holds the money; a made-up login is refused before anything is built. Paying out to a bank or a card is not built.
+
+## When something is wrong
+
+- **The keeper cannot be reached.** A promo, claim or print page says "We can't reach FreeIf right now" and keeps asking; it does not sit on a loading box. A page that already shows a promo keeps showing it.
+- **The live updates drop.** The promo page says "Reconnecting" where it said "Live", reads the promo every four seconds meanwhile, and says "Live" again when the event stream is back.
+- **No live price.** The price card says "We can't get a live price right now. Try again in a moment." and asks again in 15 seconds. A stale price is never shown. The keeper keeps a game's names and times for a moment, so a slow answer from Gemini's event route alone no longer costs the price: the price itself is read from Gemini's order book each time.
+- **The game has started, the price expired, the payment failed, the vault cannot cover the size.** Each has its own sentence in the form or the Pay sheet, and none of them charges anything.
+- **A payout did not go through.** The vault sets it aside and the keeper sends it again. The customer's card says "Your $8.00 is set aside. We're sending it again." in place of "Paying you $8.00 now".
+- **A promo that is full, closed or cancelled** says so on the customer's page, with the offer still in view.
 
 ## A cover: the business gets paid
 
@@ -71,7 +83,7 @@ Settings:
 
 On Vercel the two Circle values are project variables. On a developer machine they are read from `~/.freeif/secrets.env` (or the file named in `FREEIF_SECRETS`), the same file the keeper reads; nothing secret is kept in this folder. The vault's address is not a setting: the server asks the keeper's `/health` for it.
 
-`pnpm check:pay` plays the merchant with a plain test key (`TEST_MERCHANT_PK` in the secrets file) in place of the Circle wallet: a signed quote from the keeper, the permit, and the promo call, simulated on Arc, once for a promo on a game and once for a cover on a temperature market. It also checks that a short permit, an altered quote, an expired quote and a cover's quote sent as a customer promo are refused.
+`pnpm check:pay` plays the merchant with a plain test key (`TEST_MERCHANT_PK` in the secrets file) in place of the Circle wallet: a signed quote from the keeper, the permit, and the promo call, simulated on Arc, once for a promo on a game and once for a cover on a temperature market, and the cash-out transfer. It also checks that a short permit, an altered quote, an expired quote and a cover's quote sent as a customer promo are refused, and that cash out refuses more than the balance, the account's own address, something that is not an address, and the token's address.
 
 ## Layout
 
@@ -81,6 +93,7 @@ On Vercel the two Circle values are project variables. On a developer machine th
 | `src/components/receipt-card.tsx` | The ticket: one component with a state, on every page |
 | `src/components/merchant/` | The form, the game picker, the picker for a day and a temperature (a cover), the price card and the Pay sheet |
 | `src/components/claim-view.tsx`, `promo-view.tsx`, `print-view.tsx` | The three promo pages |
+| `src/components/cash-out.tsx`, `src/lib/server/cash-out.ts` | The cash-out sheet, and the transfer it sends |
 | `src/components/lp-view.tsx`, `src/lib/injected.ts` | The vault page, and the browser wallet it uses |
 | `src/lib/wallet.tsx` | The login and Circle's challenges, as a React provider |
 | `src/lib/keeper.ts` | The keeper's API and its types |
@@ -97,4 +110,4 @@ On Vercel the two Circle values are project variables. On a developer machine th
 - The claim page sends the customer's login token to the keeper with the claim, and the keeper asks Circle whose it is: one claim per login per promo, for that login's own account. The token is a credential for an hour; it goes to the keeper over HTTPS and is not stored there.
 - Buttons, inputs, the bottom sheet and the chart are written by hand, not taken from a component library. The sheet does not trap focus on purpose: Circle's window is an iframe on the page and has to sit above it.
 - A login lasts one hour (Circle's user token). After that the app asks for the email again.
-- Cash out shows the balance and says it is coming; it does not send money yet.
+- Cash out sends to an address only. Its confirmation screen in Circle's window, and a real send, have not been run with a real login yet.

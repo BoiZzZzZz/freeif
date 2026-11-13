@@ -5,6 +5,7 @@
 // asked for anything. The relayer registers them; the customer sees nothing about it.
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { CashOut } from "@/components/cash-out";
 import { EmailStep } from "@/components/email-step";
 import { SiteFooter } from "@/components/mechanics";
 import { ReceiptCard, type CardState } from "@/components/receipt-card";
@@ -224,6 +225,8 @@ function Frame({ children }: { children: React.ReactNode }) {
 function Covered({ promo, state, address, waiting }: { promo: Promo; state: CardState; address: string; waiting: boolean }) {
   const [balance, setBalance] = useState<bigint | null>(null);
   const [cashOut, setCashOut] = useState(false);
+  // Counts the times money has left, so the balance is read again after each.
+  const [sends, setSends] = useState(0);
   const paid = state === "paid";
 
   useEffect(() => {
@@ -236,7 +239,7 @@ function Covered({ promo, state, address, waiting }: { promo: Promo; state: Card
     return () => {
       live = false;
     };
-  }, [paid, address]);
+  }, [paid, address, sends]);
 
   if (paid) {
     return (
@@ -246,12 +249,8 @@ function Covered({ promo, state, address, waiting }: { promo: Promo; state: Card
           <span className="num text-[18px]">{balance === null ? usd(promo.payoutPerClaim) : usd(balance)}</span>
         </div>
         <Button onClick={() => setCashOut(true)}>Cash out</Button>
-        <Sheet open={cashOut} onClose={() => setCashOut(false)} title="Cash out">
-          <div className="space-y-3 text-[15px]">
-            <p>Cash out to a bank or card is coming. This demo pays in test dollars.</p>
-            <p className="text-ink/60">Your money is in your FreeIf account, under the email you used here.</p>
-          </div>
-        </Sheet>
+        <p className="text-[14px] text-ink/60">Your money is in your FreeIf account, under the email you used here.</p>
+        <CashOut open={cashOut} onClose={() => setCashOut(false)} address={address} onSent={() => setSends((n) => n + 1)} />
       </>
     );
   }

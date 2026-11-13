@@ -1,5 +1,6 @@
 // Paying for a promo, step 3: where the transaction is. The browser asks every second or two after the
-// merchant approves it. One look per request, so nothing here waits in a loop.
+// merchant approves it. One look per request, so nothing here waits in a loop. Cash out asks the same
+// way with `kind: "transfer"`: a transfer is done when it is in a block, and has no promo to name.
 import { parseEventLogs, type Hex } from "viem";
 import { promoVaultAbi } from "@/lib/abi";
 import { circle, requireLogin } from "@/lib/server/circle";
@@ -35,6 +36,7 @@ export const POST = post(async (body) => {
   const receipt = await chain.getTransactionReceipt({ hash: tx.txHash }).catch(() => null);
   if (!receipt) return { state: "pending", txHash: tx.txHash };
   if (receipt.status !== "success") return { state: "failed", message: NOT_CHARGED, txHash: tx.txHash };
+  if (body.kind === "transfer") return { state: "done", txHash: tx.txHash };
 
   const [created] = parseEventLogs({ abi: promoVaultAbi, eventName: "PromoCreated", logs: receipt.logs });
   if (!created) return { state: "failed", message: NOT_CHARGED, txHash: tx.txHash };

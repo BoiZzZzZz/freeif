@@ -5,6 +5,7 @@
 import { hashTypedData, recoverTypedDataAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { env, Refusal } from "@/lib/server/http";
+import { cashOutCall } from "@/lib/server/cash-out";
 import { permitTypedData, promoCall } from "@/lib/server/promo-call";
 import { keeper } from "@/lib/keeper";
 import { usdcBalance } from "@/lib/balance";
@@ -77,6 +78,15 @@ async function main() {
     "an expired quote",
     promoCall(account.address, { ...quoted.quote, expiry: 1 }, quoted.signature, permitSignature, deadline),
   );
+
+  // Cash out, as the /api/wallet/cash-out route builds and checks it: a transfer of ten cents.
+  const friend = "0x000000000000000000000000000000000000dEaD";
+  const out = await cashOutCall(account.address, friend, "100000");
+  console.log("OK: the cash-out transfer would succeed. token", out.token, "calldata bytes", (out.callData.length - 2) / 2);
+  await refused("cash out of more than the balance", cashOutCall(account.address, friend, "999000000"));
+  await refused("cash out to the account itself", cashOutCall(account.address, account.address, "100000"));
+  await refused("cash out to something that is not an address", cashOutCall(account.address, "tony@example.com", "100000"));
+  await refused("cash out to the dollar token itself", cashOutCall(account.address, "0x3600000000000000000000000000000000000000", "100000"));
 
   // The same path for a cover: one payout to the business itself, on a daily temperature market.
   const { games: days } = await keeper.weather();
