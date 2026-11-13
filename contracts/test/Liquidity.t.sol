@@ -87,6 +87,7 @@ contract DepositTest is VaultTest {
 
     function test_deposit_isPricedOnFreeBalanceOnly() public {
         _deposit(alice, 1_000 * USDC);
+        vault.setMaxExposureBps(10_000); // this test is about share pricing, not the exposure cap
         // A promo pays 390 in premium and locks 1,000. Free balance: 1,390 - 1,000 = 390.
         _openPromo(390 * USDC, 1_000 * USDC);
         assertEq(vault.freeBalance(), 390 * USDC);
@@ -195,6 +196,7 @@ contract LockedCollateralTest is VaultTest {
     /// F11 regression: the only LP leaves while a promo is open, and the promo can still pay in full.
     function test_withdrawAll_whilePromoOpen_leavesTheFullPayout() public {
         uint256 aliceShares = _deposit(alice, 1_000 * USDC);
+        vault.setMaxExposureBps(10_000); // one promo may take the whole vault, the worst case for F11
         _openPromo(390 * USDC, 1_000 * USDC);
 
         vm.prank(alice);
@@ -208,7 +210,8 @@ contract LockedCollateralTest is VaultTest {
 
     function test_withdraw_whenEverythingIsLocked_paysNothing() public {
         uint256 aliceShares = _deposit(alice, 1_000 * USDC);
-        _setLocked(1_000 * USDC);
+        vault.setMaxExposureBps(10_000);
+        _openPromo(0, 1_000 * USDC); // no premium, and the whole vault is locked
 
         vm.prank(alice);
         uint256 out = vault.withdraw(aliceShares);
@@ -232,7 +235,8 @@ contract LockedCollateralTest is VaultTest {
         assertLt(vault.freeBalance(), 1_000, "only the dead shares' dust is left free");
     }
 
-    /// If the vault ever held less than it has locked, nothing can be withdrawn at all.
+    /// If the vault ever held less than it has locked, nothing can be withdrawn at all. No call
+    /// sequence reaches that state, so the lock is written straight into storage.
     function test_withdraw_revertsWhenBalanceIsBelowTheLock() public {
         uint256 aliceShares = _deposit(alice, 1_000 * USDC);
         _setLocked(1_000 * USDC + 1);
@@ -256,10 +260,11 @@ contract LockedCollateralTest is VaultTest {
 
         uint256 aliceShares = _deposit(alice, aliceIn);
         uint256 bobShares = _deposit(bob, bobIn);
-        usdc.mint(address(vault), premium);
-        // Any lock the vault can cover, from nothing to its whole balance.
-        locked = bound(locked, 0, usdc.balanceOf(address(vault)));
-        _setLocked(locked);
+        // One promo with any lock the vault can cover, up to its whole balance once the premium
+        // is in. A lock is at least 1 and never below the premium.
+        vault.setMaxExposureBps(10_000);
+        locked = bound(locked, premium == 0 ? 1 : premium, vault.freeBalance() + premium);
+        _createPromo(locked, 1, premium);
 
         aliceOutShares = bound(aliceOutShares, 1, aliceShares);
         bobOutShares = bound(bobOutShares, 1, bobShares);

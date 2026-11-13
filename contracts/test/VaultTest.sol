@@ -6,12 +6,24 @@ import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {PromoVault} from "../src/PromoVault.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 
-/// @dev Shared setup. Until createPromo exists, a promo's lock is simulated by writing
-///      lockedCollateral directly and minting the premium to the vault.
+/// @dev Shared setup and helpers. Promos are opened through the real createPromo with a quote
+///      signed by the test pricer key.
 abstract contract VaultTest is Test {
     using stdStorage for StdStorage;
 
     uint256 internal constant USDC = 1e6;
+
+    string internal constant EVENT_ID_PLAIN = "362998";
+    bytes32 internal constant EVENT_ID = keccak256("362998");
+    bytes32 internal constant SYMBOL = keccak256("GEMI-NFL-2610251700-IND-MIN-M-MIN");
+
+    /// @dev Written out here, not read from the vault, so a change to the type string or the
+    ///      domain in the contract fails the signature tests.
+    bytes32 internal constant QUOTE_TYPEHASH = keccak256(
+        "Quote(address merchant,address claimSigner,bytes32 geminiEventId,bytes32 instrumentSymbol,uint256 payoutPerClaim,uint32 maxClaims,uint256 premium,uint64 claimDeadline,uint64 marketCloseTime,bool hedgeMode,uint64 expiry,bytes32 nonce)"
+    );
+    bytes32 internal constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     MockUSDC internal usdc;
     PromoVault internal vault;
@@ -21,15 +33,28 @@ abstract contract VaultTest is Test {
     address internal oracle = makeAddr("oracle");
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
+    address internal merchant = makeAddr("merchant");
+    address internal relayer = makeAddr("relayer");
+
+    uint256 private _nonce;
 
     event Deposited(address indexed lp, uint256 amount, uint256 sharesMinted);
     event Withdrawn(address indexed lp, uint256 sharesBurned, uint256 amount);
+    event PromoCreated(
+        uint256 indexed promoId,
+        address indexed merchant,
+        bytes32 indexed instrumentSymbol,
+        PromoVault.Quote quote
+    );
+    event ClaimRegistered(uint256 indexed promoId, address indexed customer, uint32 claimCount);
 
     function setUp() public virtual {
         (pricer, pricerPk) = makeAddrAndKey("pricer");
         usdc = new MockUSDC();
         vault = new PromoVault(usdc, pricer, oracle);
     }
+
+    // ------------------------------------------------------------ liquidity
 
     function _deposit(address lp, uint256 amount) internal returns (uint256 minted) {
         usdc.mint(lp, amount);
@@ -39,13 +64,92 @@ abstract contract VaultTest is Test {
         vm.stopPrank();
     }
 
+    /// @dev Writes lockedCollateral directly. Only for states no call sequence can reach.
     function _setLocked(uint256 amount) internal {
         stdstore.target(address(vault)).sig("lockedCollateral()").checked_write(amount);
     }
 
-    /// @dev Stand-in for a promo: `premium` arrives and `maxPayout` is locked.
-    function _openPromo(uint256 premium, uint256 maxPayout) internal {
-        usdc.mint(address(vault), premium);
-        _setLocked(vault.lockedCollateral() + maxPayout);
+    // ------------------------------------------------------------ quotes
+
+    /// @dev A quote for `merchant` with the relayer as claim signer. Claims close in one day, the
+    ///      market closes in three, the quote lasts 90 seconds, and every quote has a new nonce.
+    function _quote(uint256 payoutPerClaim, uint32 maxClaims, uint256 premium)
+        internal
+        returns (PromoVault.Quote memory)
+    {
+        return PromoVault.Quote({
+            merchant: merchant,
+            claimSigner: relayer,
+            geminiEventId: EVENT_ID,
+            instrumentSymbol: SYMBOL,
+            payoutPerClaim: payoutPerClaim,
+            maxClaims: maxClaims,
+            premium: premium,
+            claimDeadline: uint64(block.timestamp + 1 days),
+            marketCloseTime: uint64(block.timestamp + 3 days),
+            hedgeMode: false,
+            expiry: uint64(block.timestamp + 90),
+            nonce: bytes32(++_nonce)
+        });
+    }
+
+    /// @dev The EIP-712 digest, built field by field without calling the vault.
+    function _digest(PromoVault.Quote memory q) internal view returns (bytes32) {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                DOMAIN_TYPEHASH, keccak256("PromoVault"), keccak256("1"), block.chainid, address(vault)
+            )
+        );
+        bytes32 structHash = keccak256(
+            bytes.concat(
+                abi.encode(
+                    QUOTE_TYPEHASH,
+                    q.merchant,
+                    q.claimSigner,
+                    q.geminiEventId,
+                    q.instrumentSymbol,
+                    q.payoutPerClaim,
+                    q.maxClaims
+                ),
+                abi.encode(q.premium, q.claimDeadline, q.marketCloseTime, q.hedgeMode, q.expiry, q.nonce)
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    function _signWith(uint256 pk, PromoVault.Quote memory q) internal view returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, _digest(q));
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _sign(PromoVault.Quote memory q) internal view returns (bytes memory) {
+        return _signWith(pricerPk, q);
+    }
+
+    /// @dev Give the merchant named in the quote the premium and the approval.
+    function _fund(PromoVault.Quote memory q) internal {
+        usdc.mint(q.merchant, q.premium);
+        vm.prank(q.merchant);
+        usdc.approve(address(vault), q.premium);
+    }
+
+    /// @dev Fund the merchant, sign with the pricer key and create the promo.
+    function _create(PromoVault.Quote memory q) internal returns (uint256 promoId) {
+        _fund(q);
+        bytes memory sig = _sign(q);
+        vm.prank(q.merchant);
+        promoId = vault.createPromo(q, sig);
+    }
+
+    function _createPromo(uint256 payoutPerClaim, uint32 maxClaims, uint256 premium)
+        internal
+        returns (uint256 promoId)
+    {
+        return _create(_quote(payoutPerClaim, maxClaims, premium));
+    }
+
+    /// @dev A 50-customer promo: the merchant pays `premium` and `maxPayout` is locked.
+    function _openPromo(uint256 premium, uint256 maxPayout) internal returns (uint256 promoId) {
+        return _createPromo(maxPayout / 50, 50, premium);
     }
 }

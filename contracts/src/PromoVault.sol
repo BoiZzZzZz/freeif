@@ -3,6 +3,8 @@ pragma solidity 0.8.28;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 /// @title PromoVault
 /// @notice A USDC vault that underwrites "free if X happens" promotions. Liquidity providers deposit
@@ -10,7 +12,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 ///         the balance LPs can withdraw.
 /// @dev All amounts are USDC base units through the ERC-20 interface (6 decimals). On Arc the native
 ///      gas token is also USDC but with 18 decimals; this contract never touches native value.
-contract PromoVault {
+contract PromoVault is EIP712 {
     using SafeERC20 for IERC20;
 
     // ---------------------------------------------------------------- types
@@ -34,7 +36,7 @@ contract PromoVault {
         uint32 maxClaims;
         uint32 claimCount;
         uint256 premiumPaid;
-        uint256 collateralLocked; // payoutPerClaim * maxClaims, the full maximum payout
+        uint256 collateralLocked; // what this promo still locks: starts at payoutPerClaim * maxClaims
         uint64 claimDeadline; // claims must register before this; settlement is allowed after it
         uint64 marketCloseTime; // Gemini expiryDate, used only for the void grace period
         uint64 settledAt;
@@ -44,7 +46,29 @@ contract PromoVault {
         bool hedgeMode; // true: one claim, paid to the merchant
     }
 
+    /// @notice A price for one promo, signed by the pricer as EIP-712 typed data.
+    /// @dev Every field is a static type, so the struct ABI-encodes as its fields in order. Both
+    ///      quoteDigest and the PromoCreated event rely on that.
+    struct Quote {
+        address merchant; // the only address that may use this quote
+        address claimSigner; // copied into the promo
+        bytes32 geminiEventId;
+        bytes32 instrumentSymbol;
+        uint256 payoutPerClaim;
+        uint32 maxClaims;
+        uint256 premium; // what the merchant pays
+        uint64 claimDeadline;
+        uint64 marketCloseTime;
+        bool hedgeMode;
+        uint64 expiry; // the quote is unusable at or after this time
+        bytes32 nonce; // usable once
+    }
+
     // ---------------------------------------------------------------- constants
+
+    bytes32 public constant QUOTE_TYPEHASH = keccak256(
+        "Quote(address merchant,address claimSigner,bytes32 geminiEventId,bytes32 instrumentSymbol,uint256 payoutPerClaim,uint32 maxClaims,uint256 premium,uint64 claimDeadline,uint64 marketCloseTime,bool hedgeMode,uint64 expiry,bytes32 nonce)"
+    );
 
     /// @notice Shares minted to DEAD_ADDRESS on the first deposit and never redeemable.
     /// @dev Stops the first depositor from inflating the share price with a donation so that later
@@ -83,6 +107,11 @@ contract PromoVault {
 
     event Deposited(address indexed lp, uint256 amount, uint256 sharesMinted);
     event Withdrawn(address indexed lp, uint256 sharesBurned, uint256 amount);
+    /// @dev The data is the quote's twelve fields in order, one word each.
+    event PromoCreated(
+        uint256 indexed promoId, address indexed merchant, bytes32 indexed instrumentSymbol, Quote quote
+    );
+    event ClaimRegistered(uint256 indexed promoId, address indexed customer, uint32 claimCount);
     event PricerSet(address indexed pricer);
     event OracleSet(address indexed oracle);
     event MaxExposureBpsSet(uint16 bps);
@@ -99,6 +128,16 @@ contract PromoVault {
     error FirstDepositTooSmall(uint256 amount, uint256 minimum);
     error ZeroShares();
     error InsufficientShares(uint256 held, uint256 requested);
+    error UnknownPromo(uint256 promoId);
+    error NotQuoteMerchant();
+    error QuoteExpired(uint64 expiry);
+    error QuoteNonceUsed(bytes32 nonce);
+    error InvalidQuoteSignature();
+    error ClaimDeadlinePassed(uint64 claimDeadline);
+    error ClaimDeadlineAfterClose(uint64 claimDeadline, uint64 marketCloseTime);
+    error HedgeNeedsOneClaim(uint32 maxClaims);
+    error PremiumAboveMaxPayout(uint256 premium, uint256 maxPayout);
+    error ExposureTooHigh(uint256 vaultRisk, uint256 cap);
 
     // ---------------------------------------------------------------- setup
 
@@ -114,7 +153,7 @@ contract PromoVault {
         _;
     }
 
-    constructor(IERC20 usdc_, address pricer_, address oracle_) {
+    constructor(IERC20 usdc_, address pricer_, address oracle_) EIP712("PromoVault", "1") {
         if (address(usdc_) == address(0) || pricer_ == address(0) || oracle_ == address(0)) {
             revert ZeroAddress();
         }
@@ -131,6 +170,23 @@ contract PromoVault {
     }
 
     function getPromo(uint256 promoId) external view returns (Promo memory) {
+        return _promo(promoId);
+    }
+
+    /// @notice Every customer registered for a promo, in registration order.
+    function getClaimants(uint256 promoId) external view returns (address[] memory) {
+        return claimants[promoId];
+    }
+
+    /// @notice The EIP-712 digest the pricer signs for a quote, under this vault's domain
+    ///         (name "PromoVault", version "1", this chain, this address).
+    function quoteDigest(Quote calldata q) public view returns (bytes32) {
+        // Quote has only static fields, so this is the typehash followed by each field in a word.
+        return _hashTypedDataV4(keccak256(abi.encode(QUOTE_TYPEHASH, q)));
+    }
+
+    function _promo(uint256 promoId) internal view returns (Promo storage) {
+        if (promoId >= promos.length) revert UnknownPromo(promoId);
         return promos[promoId];
     }
 
@@ -164,8 +220,8 @@ contract PromoVault {
         totalShares += sharesMinted;
         shares[msg.sender] += sharesMinted;
 
-        usdc.safeTransferFrom(msg.sender, address(this), amount);
         emit Deposited(msg.sender, amount, sharesMinted);
+        usdc.safeTransferFrom(msg.sender, address(this), amount);
     }
 
     /// @notice Burn shares for their portion of the free balance.
@@ -184,8 +240,73 @@ contract PromoVault {
         shares[msg.sender] = held - shareAmount;
         totalShares -= shareAmount;
 
-        usdc.safeTransfer(msg.sender, amount);
         emit Withdrawn(msg.sender, shareAmount, amount);
+        usdc.safeTransfer(msg.sender, amount);
+    }
+
+    // ---------------------------------------------------------------- promos
+
+    /// @notice Open a promo from a quote signed by the pricer. The caller pays the premium and the
+    ///         vault locks the full maximum payout.
+    /// @dev The caller must have approved the vault for q.premium.
+    /// @return promoId Index of the new promo.
+    function createPromo(Quote calldata q, bytes calldata sig)
+        external
+        whenNotPaused
+        returns (uint256 promoId)
+    {
+        if (q.merchant != msg.sender) revert NotQuoteMerchant();
+        if (q.expiry <= block.timestamp) revert QuoteExpired(q.expiry);
+        if (usedQuoteNonce[q.nonce]) revert QuoteNonceUsed(q.nonce);
+        if (q.payoutPerClaim == 0 || q.maxClaims == 0) revert ZeroAmount();
+        if (q.claimDeadline <= block.timestamp) revert ClaimDeadlinePassed(q.claimDeadline);
+        if (q.claimDeadline > q.marketCloseTime) {
+            revert ClaimDeadlineAfterClose(q.claimDeadline, q.marketCloseTime);
+        }
+        if (q.hedgeMode && q.maxClaims != 1) revert HedgeNeedsOneClaim(q.maxClaims);
+
+        (address signer, ECDSA.RecoverError err,) = ECDSA.tryRecoverCalldata(quoteDigest(q), sig);
+        if (err != ECDSA.RecoverError.NoError || signer != pricer) revert InvalidQuoteSignature();
+
+        uint256 maxPayout = q.payoutPerClaim * q.maxClaims;
+        if (q.premium > maxPayout) revert PremiumAboveMaxPayout(q.premium, maxPayout);
+        {
+            // The vault's own money at risk, against the free balance before the premium arrives.
+            // The cap is at most 100%, so vaultRisk <= freeBalance, which is exactly what keeps
+            // balance >= lockedCollateral once the premium is in and the payout is locked.
+            uint256 vaultRisk = maxPayout - q.premium;
+            uint256 cap = freeBalance() * maxExposureBps / 10_000;
+            if (vaultRisk > cap) revert ExposureTooHigh(vaultRisk, cap);
+        }
+
+        usedQuoteNonce[q.nonce] = true;
+        lockedCollateral += maxPayout;
+
+        promoId = promos.length;
+        Promo storage p = promos.push();
+        p.merchant = q.merchant;
+        p.claimSigner = q.claimSigner;
+        p.geminiEventId = q.geminiEventId;
+        p.instrumentSymbol = q.instrumentSymbol;
+        p.payoutPerClaim = q.payoutPerClaim;
+        p.maxClaims = q.maxClaims;
+        p.premiumPaid = q.premium;
+        p.collateralLocked = maxPayout;
+        p.claimDeadline = q.claimDeadline;
+        p.marketCloseTime = q.marketCloseTime;
+        p.hedgeMode = q.hedgeMode;
+
+        if (q.hedgeMode) {
+            // The merchant is the one claimant, so a "yes" pays the merchant.
+            p.claimCount = 1;
+            hasClaim[promoId][q.merchant] = true;
+            claimants[promoId].push(q.merchant);
+        }
+
+        emit PromoCreated(promoId, q.merchant, q.instrumentSymbol, q);
+        if (q.hedgeMode) emit ClaimRegistered(promoId, q.merchant, 1);
+
+        usdc.safeTransferFrom(msg.sender, address(this), q.premium);
     }
 
     // ---------------------------------------------------------------- admin
