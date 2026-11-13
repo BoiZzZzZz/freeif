@@ -3,14 +3,20 @@
 // finalizes and pays. Needs TEST_MERCHANT_PK, TEST_CUSTOMER_ADDRESSES and CLAIM_TEST_KEY (the key the
 // keeper runs with: the test customers are plain keys with no login), and a funded vault.
 //
+// When the keeper says the new promo uses claim cards (CARDS_FROM_PROMO), the script makes one card key
+// per customer, sends the cards' addresses with the test key, and after a "yes" collects the first card
+// to the first test customer, the way the card page does.
+//
 //   node scripts/e2e.ts [--series BTC05M] [--payout 1] [--customers 3] [--pick next|likely] [--approve]
 //
 // --pick likely takes the running window when Gemini prices it at 60% or more, which makes a payout more likely.
 // --approve uses approve + createPromo; the default is one transaction, createPromoWithPermit.
 import { parseArgs } from "node:util";
 import { erc20Abi, formatUnits, hashTypedData, parseEventLogs, parseSignature, parseUnits, type Address, type Hex } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { promoVaultAbi } from "../src/abi.ts";
 import { Status, explorerTx, makePublicClient, makeWalletClient, quoteDomain, quoteFromJson, quoteTypes, statusName, type QuoteJson } from "../src/chain.ts";
+import { CARD_DUST, collectCard, type CollectClient } from "../src/collect.ts";
 import * as config from "../src/config.ts";
 
 const { values: args } = parseArgs({
@@ -154,37 +160,89 @@ if (!createdLog) throw new Error("No PromoCreated event in the receipt");
 const promoId = createdLog.args.promoId;
 console.log(`promo ${promoId} created ${explorerTx(createHash)}`);
 
-step("Customers claim through the relayer");
-const before = await Promise.all(customers.map((c) => client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [c] })));
-// A real customer's claim carries a Circle login. These customers have none, so first three claims that
-// must be refused: no login, a login Circle does not know, and a test name with the wrong key.
+// The keeper may need a block or two to see the new promo.
+type KeeperPromo = { cards?: boolean; cardProgress?: { registered: string[]; queued: number } | null };
+let seen: KeeperPromo | null = null;
+for (let i = 0; i < 20 && seen === null; i++) {
+  const res = await api<KeeperPromo>(`/promos/${promoId}`);
+  if (res.status === 200) seen = res.body;
+  else await sleep(1500);
+}
+if (seen === null) throw new Error(`The keeper does not know promo ${promoId}`);
+const cardMode = seen.cards === true;
 type Refused = { error: { code: string } };
-const claimFor = (i: number) => ({ promoId: promoId.toString(), customer: customers[i], testUser: `customer${i + 1}.promo${promoId}` });
 const withKey = { "x-test-key": testKey };
-const bare = { promoId: promoId.toString(), customer: customers[0] };
-const noLogin = await api<Refused>("/claims", bare);
-if (noLogin.status !== 400) throw new Error(`A claim with no login was not refused: ${JSON.stringify(noLogin)}`);
-const badLogin = await api<Refused>("/claims", { ...bare, userToken: "not.a.login" });
-if (badLogin.status !== 401 || badLogin.body.error.code !== "login") {
-  throw new Error(`A claim with a login Circle does not know should answer 401 "login": ${JSON.stringify(badLogin)}`);
-}
-const wrongKey = await api<Refused>("/claims", claimFor(0), { "x-test-key": "wrong" });
-if (wrongKey.status !== 401) throw new Error(`A test claim with the wrong key was not refused: ${JSON.stringify(wrongKey)}`);
-const untouched = await client.readContract({ address: vault, abi: promoVaultAbi, functionName: "getPromo", args: [promoId] });
-if (untouched.claimCount !== 0) throw new Error("A refused claim was registered");
-console.log("refused: a claim with no login, one with a login Circle does not know, and a test claim with the wrong key");
 
-for (const [i, customer] of customers.entries()) {
-  const claim = await ok<ClaimBody>("/claims", claimFor(i), withKey);
-  console.log(`${customer} is customer ${claim.claimCount} ${claim.txHash ? explorerTx(claim.txHash) : ""}`);
+// Who the vault pays on a "yes": the test customers, or the cards.
+let payees: Address[];
+let cardKeys: Hex[] = [];
+if (cardMode) {
+  step(`Promo ${promoId} uses claim cards: the merchant makes ${customers.length} and the relayer registers them`);
+  // Made here, as the merchant's browser makes them. Only the addresses go to the keeper.
+  cardKeys = customers.map(() => generatePrivateKey());
+  payees = cardKeys.map((key) => privateKeyToAccount(key).address);
+  const cards = payees.map(String);
+  const bareCards = await api<Refused>(`/promos/${promoId}/cards`, { cards });
+  if (bareCards.status !== 401) throw new Error(`Cards with no login and no key were not refused: ${JSON.stringify(bareCards)}`);
+  const openClaim = await api<Refused>("/claims", { promoId: promoId.toString(), customer: customers[0], testUser: `customer1.promo${promoId}` }, withKey);
+  if (openClaim.status !== 409 || openClaim.body.error.code !== "cards-only") {
+    throw new Error(`An open claim on a card promo should answer 409 "cards-only": ${JSON.stringify(openClaim)}`);
+  }
+  console.log("refused: cards with no login and no key (401), and an open claim on this promo (409 cards-only)");
+  const accepted = await api<{ queued: number }>(`/promos/${promoId}/cards`, { cards }, withKey);
+  if (accepted.status !== 202) throw new Error(`The cards were not accepted: ${JSON.stringify(accepted)}`);
+  console.log(`accepted (202), ${accepted.body.queued} in the relayer's line`);
+  const readyBy = now() + 120;
+  for (;;) {
+    const registered = await Promise.all(
+      payees.map((card) => client.readContract({ address: vault, abi: promoVaultAbi, functionName: "hasClaim", args: [promoId, card] })),
+    );
+    const ready = registered.filter(Boolean).length;
+    if (ready === payees.length) break;
+    if (now() > readyBy) throw new Error(`Only ${ready} of ${payees.length} cards were registered after two minutes`);
+    await sleep(2000);
+  }
+  // Sending the same list again is safe: nothing is sent for a card that is registered. The keeper's own read
+  // of the promo is a moment behind the chain's, so give it one.
+  await sleep(3000);
+  const again = await api<{ alreadyRegistered: number; queued: number }>(`/promos/${promoId}/cards`, { cards }, withKey);
+  if (again.status !== 202 || again.body.alreadyRegistered !== payees.length || again.body.queued !== 0) {
+    throw new Error(`The same cards sent again should all be skipped: ${JSON.stringify(again)}`);
+  }
+  for (const [i, card] of payees.entries()) console.log(`card ${i + 1} ${card} is a claimant`);
+  console.log("the same list sent again sends nothing");
+} else {
+  payees = customers;
+  step("Customers claim through the relayer");
+  // A real customer's claim carries a Circle login. These customers have none, so first three claims that
+  // must be refused: no login, a login Circle does not know, and a test name with the wrong key.
+  const claimFor = (i: number) => ({ promoId: promoId.toString(), customer: customers[i], testUser: `customer${i + 1}.promo${promoId}` });
+  const bare = { promoId: promoId.toString(), customer: customers[0] };
+  const noLogin = await api<Refused>("/claims", bare);
+  if (noLogin.status !== 400) throw new Error(`A claim with no login was not refused: ${JSON.stringify(noLogin)}`);
+  const badLogin = await api<Refused>("/claims", { ...bare, userToken: "not.a.login" });
+  if (badLogin.status !== 401 || badLogin.body.error.code !== "login") {
+    throw new Error(`A claim with a login Circle does not know should answer 401 "login": ${JSON.stringify(badLogin)}`);
+  }
+  const wrongKey = await api<Refused>("/claims", claimFor(0), { "x-test-key": "wrong" });
+  if (wrongKey.status !== 401) throw new Error(`A test claim with the wrong key was not refused: ${JSON.stringify(wrongKey)}`);
+  const untouched = await client.readContract({ address: vault, abi: promoVaultAbi, functionName: "getPromo", args: [promoId] });
+  if (untouched.claimCount !== 0) throw new Error("A refused claim was registered");
+  console.log("refused: a claim with no login, one with a login Circle does not know, and a test claim with the wrong key");
+
+  for (const [i, customer] of customers.entries()) {
+    const claim = await ok<ClaimBody>("/claims", claimFor(i), withKey);
+    console.log(`${customer} is customer ${claim.claimCount} ${claim.txHash ? explorerTx(claim.txHash) : ""}`);
+  }
+  const again = await ok<ClaimBody>("/claims", claimFor(0), withKey);
+  if (!again.alreadyRegistered) throw new Error("A repeated claim was registered twice");
+  if (customers.length > 1) {
+    const reused = await api<Refused>("/claims", { ...claimFor(0), customer: customers[1] }, withKey);
+    if (reused.status !== 409) throw new Error(`One user claimed for a second wallet: ${JSON.stringify(reused)}`);
+  }
+  console.log("a repeated claim sends nothing, and one user cannot claim for two wallets");
 }
-const again = await ok<ClaimBody>("/claims", claimFor(0), withKey);
-if (!again.alreadyRegistered) throw new Error("A repeated claim was registered twice");
-if (customers.length > 1) {
-  const reused = await api<Refused>("/claims", { ...claimFor(0), customer: customers[1] }, withKey);
-  if (reused.status !== 409) throw new Error(`One user claimed for a second wallet: ${JSON.stringify(reused)}`);
-}
-console.log("a repeated claim sends nothing, and one user cannot claim for two wallets");
+const before = await Promise.all(payees.map((c) => client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [c] })));
 
 step("Wait for the keeper: settle, finalize, pay");
 const disputeWindow = await client.readContract({ address: vault, abi: promoVaultAbi, functionName: "disputeWindow" });
@@ -216,7 +274,7 @@ for (const l of logs) {
     : "";
   console.log(`${l.eventName}${detail} ${explorerTx(l.transactionHash)}`);
 }
-const after = await Promise.all(customers.map((c) => client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [c] })));
+const after = await Promise.all(payees.map((c) => client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [c] })));
 const received = after.map((a, i) => a - before[i]!);
 
 // Judged from this promo's own Paid events. The balances are a second check, and only a lower bound:
@@ -224,13 +282,38 @@ const received = after.map((a, i) => a - before[i]!);
 const paidLogs = logs.filter((l) => l.eventName === "Paid");
 const paid = paidLogs.length;
 if (promo.outcomeYes) {
-  const eachPaidOnce = customers.every(
+  const eachPaidOnce = payees.every(
     (c) => paidLogs.filter((l) => l.args.customer.toLowerCase() === c.toLowerCase() && l.args.amount === payoutPerClaim).length === 1,
   );
-  if (paid !== customers.length || !eachPaidOnce || received.some((r) => r < payoutPerClaim)) {
-    throw new Error(`Result "yes" but ${paid} of ${customers.length} were paid; received ${received.map(usd).join(", ")}`);
+  if (paid !== payees.length || !eachPaidOnce || received.some((r) => r < payoutPerClaim)) {
+    throw new Error(`Result "yes" but ${paid} of ${payees.length} were paid; received ${received.map(usd).join(", ")}`);
   }
-  console.log(`\nRESULT: yes. ${paid} customers were paid ${usd(payoutPerClaim)} each.`);
+  if (!cardMode) console.log(`\nRESULT: yes. ${paid} customers were paid ${usd(payoutPerClaim)} each.`);
+  else {
+    console.log(`${paid} cards were paid ${usd(payoutPerClaim)} each`);
+    step(`Collect card 1 to the first test customer, ${customers[0]}`);
+    const to = customers[0]!;
+    const toBefore = await client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [to] });
+    const collected = await collectCard(client as unknown as CollectClient, usdc, cardKeys[0]!, to);
+    const receipt = await client.waitForTransactionReceipt({ hash: collected.hash });
+    if (receipt.status !== "success") throw new Error(`The collect reverted: ${explorerTx(collected.hash)}`);
+    console.log(
+      `card held ${usd(collected.balance)}; sent ${formatUnits(collected.amount, 6)} with ${formatUnits(collected.fee, 6)} held back ` +
+        `(gas limit ${collected.gasLimit}, used ${receipt.gasUsed}) ${explorerTx(collected.hash)}`,
+    );
+    const [toAfter, left] = await Promise.all([
+      client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [to] }),
+      client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [payees[0]!] }),
+    ]);
+    const rose = toAfter - toBefore;
+    // A lower bound, as above: another promo may pay the same test customer meanwhile.
+    if (rose < collected.amount || collected.amount < payoutPerClaim - CARD_DUST) {
+      throw new Error(`The customer's balance rose by ${formatUnits(rose, 6)}; expected about ${usd(payoutPerClaim)} less a fee under a cent`);
+    }
+    if (left >= CARD_DUST) throw new Error(`Card 1 still holds ${formatUnits(left, 6)} after it was collected`);
+    console.log(`the customer's balance rose by ${formatUnits(rose, 6)}; the card holds ${formatUnits(left, 6)}`);
+    console.log(`\nRESULT: yes. ${paid} cards were paid ${usd(payoutPerClaim)} each, and card 1 was collected.`);
+  }
 } else {
   if (paid !== 0) throw new Error(`Result "no" but a customer was paid`);
   console.log(`\nRESULT: no. Nobody was paid; the ${usd(promo.premiumPaid)} premium stays with the vault. Run again for a "yes".`);
