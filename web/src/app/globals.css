@@ -109,11 +109,20 @@ body {
 }
 
 @media print {
+  @page {
+    margin: 0.4in;
+  }
   html,
   body {
     background: #ffffff;
   }
   .no-print {
     display: none !important;
+  }
+  /* The claim cards: two across and four down on a letter page, each with its own cut line. */
+  .printed-card {
+    height: 2.5in;
+    break-inside: avoid;
+    border-color: rgb(0 0 0 / 0.35);
   }
 }

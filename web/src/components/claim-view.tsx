@@ -108,6 +108,21 @@ export function ClaimView({ promoId }: { promoId: string }) {
     );
   }
 
+  // A card promo is covered by the cards the shop hands out, not by this page.
+  if (promo.cards) {
+    return (
+      <Frame>
+        <div className="space-y-3 rounded-[10px] border border-line bg-card p-5 text-[16px]">
+          <p>This promo uses cards. Ask for yours where you bought{promo.item ? ` ${promo.item.toLowerCase()}` : ""}.</p>
+          <p className="text-[15px] text-ink/60">Have a card? Scan the code on the card itself.</p>
+          <Link className="block text-[15px] underline underline-offset-2" href={`/promo/${promoId}`}>
+            See the promo ›
+          </Link>
+        </div>
+      </Frame>
+    );
+  }
+
   const covered = promo.customer !== null && promo.customer.number !== null;
   const taking = takingCustomers(promo, now);
   const state: CardState = covered

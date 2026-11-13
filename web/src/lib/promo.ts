@@ -29,6 +29,9 @@ export const titleOf = (p: Pick<Promo, "hedgeMode" | "item" | "business" | "cond
 const won = (p: Promo): string => (p.subject ? `${capitalize(p.subject)} won.` : "It happened.");
 const lost = (p: Promo): string => (p.subject ? `${capitalize(p.subject)} lost.` : "It didn't happen.");
 const customers = (n: number): string => `${n} customer${n === 1 ? "" : "s"}`;
+const cardCount = (n: number): string => `${n} card${n === 1 ? "" : "s"}`;
+/** Who a promo pays: its customers, or on a card promo, its cards. */
+const payees = (p: Pick<Promo, "cards">, n: number): string => (p.cards ? cardCount(n) : customers(n));
 
 /** Whether the promo still takes customers: open, before its deadline, with room left. */
 export function takingCustomers(p: Promo, now: number): "yes" | "full" | "closed" {
@@ -64,34 +67,41 @@ export function statusLine(p: Promo, now: number, merchant: boolean): StatusLine
   const each = usd(p.payoutPerClaim);
   const total = usd(BigInt(p.payoutPerClaim) * BigInt(p.claimCount));
   const youPaid = merchant ? `You paid ${paid}` : `The shop paid ${paid}`;
+  const nobody = p.cards ? "No cards were made ready" : "Nobody was covered";
   switch (p.status) {
     case "Open":
       if (now < p.claimDeadline) {
         return {
           badge: "OPEN",
           tone: "go",
-          sentence: `${p.claimCount} of ${customers(p.maxClaims)} covered. Stops accepting at ${timeOf(p.claimDeadline)}.`,
+          sentence: p.cards
+            ? `${p.claimCount} of ${cardCount(p.maxClaims)} ready. Each is worth ${each} if ${p.condition ?? "it happens"}.`
+            : `${p.claimCount} of ${customers(p.maxClaims)} covered. Stops accepting at ${timeOf(p.claimDeadline)}.`,
         };
       }
-      return { badge: "GAME ON", tone: "go", sentence: `${customers(p.claimCount)} covered. Nothing to do until the result is in.` };
+      return {
+        badge: "GAME ON",
+        tone: "go",
+        sentence: `${payees(p, p.claimCount)} ${p.cards ? "in play" : "covered"}. Nothing to do until the result is in.`,
+      };
     case "Settled":
       return {
         badge: "CONFIRMING",
         tone: "plain",
         sentence: p.outcomeYes
-          ? `${won(p)} ${p.claimCount > 0 ? `Paying ${customers(p.claimCount)} shortly.` : "Nobody was covered, so nobody is owed anything."}`
+          ? `${won(p)} ${p.claimCount > 0 ? `Paying ${payees(p, p.claimCount)} shortly.` : `${nobody}, so nobody is owed anything.`}`
           : `${lost(p)} Confirming the result.`,
       };
     case "FinalizedYes":
-      return { badge: "PAYING", tone: "go", sentence: `${won(p)} Paying ${customers(p.claimCount)} ${each} each.` };
+      return { badge: "PAYING", tone: "go", sentence: `${won(p)} Paying ${payees(p, p.claimCount)} ${each} each.` };
     case "PaidOut":
       return {
         badge: "✓ DONE",
         tone: "go",
         sentence:
           p.claimCount > 0
-            ? `${won(p)} ${customers(p.claimCount)} ${p.claimCount === 1 ? "was" : "were"} paid ${total}. ${youPaid} and nothing more.`
-            : `${won(p)} Nobody was covered, so nobody was owed anything. ${youPaid}.`,
+            ? `${won(p)} ${payees(p, p.claimCount)} ${p.claimCount === 1 ? "was" : "were"} paid ${total}.${p.cards ? " Card holders scan their card to collect." : ""} ${youPaid} and nothing more.`
+            : `${won(p)} ${nobody}, so nobody was owed anything. ${youPaid}.`,
       };
     case "FinalizedNo":
       return { badge: "PROMO OVER", tone: "grey", sentence: `${lost(p)} Nobody is owed anything. ${youPaid}.` };
@@ -175,7 +185,7 @@ export function timeline(p: Promo, merchant: boolean): TimelineStep[] | null {
   const confirmed = when("Finalized");
   let last: TimelineStep;
   if (p.status === "Vetoed") {
-    last = { label: p.hedgeMode ? "Paid" : "Customers paid", at: null };
+    last = { label: p.hedgeMode ? "Paid" : p.cards ? "Cards paid" : "Customers paid", at: null };
   } else if (!p.outcomeYes) {
     // A "no": the last step is the result becoming final.
     const at = p.status === "FinalizedNo" ? confirmed : null;
@@ -188,10 +198,10 @@ export function timeline(p: Promo, merchant: boolean): TimelineStep[] | null {
     last = { label: `${who} ${verb} ${usd(p.payoutPerClaim)}`, at, paid: true };
   } else if (p.claimCount === 0) {
     const at = p.status === "PaidOut" ? confirmed : null;
-    last = { label: at === null ? "Confirming the result" : "Nobody was covered, so nobody is owed anything", at };
+    last = { label: at === null ? "Confirming the result" : `${p.cards ? "No cards were made ready" : "Nobody was covered"}, so nobody is owed anything`, at };
   } else {
     const at = p.status === "PaidOut" ? (when("Paid") ?? confirmed) : null;
-    last = { label: `${customers(p.claimCount)} ${at === null ? (p.claimCount === 1 ? "gets" : "get") : "paid"} ${usd(p.payoutPerClaim)}${p.claimCount === 1 ? "" : " each"}`, at, paid: true };
+    last = { label: `${payees(p, p.claimCount)} ${at === null ? (p.claimCount === 1 ? "gets" : "get") : "paid"} ${usd(p.payoutPerClaim)}${p.claimCount === 1 ? "" : " each"}`, at, paid: true };
   }
   return [started, result, last];
 }
@@ -219,6 +229,7 @@ export function feedLines(p: Promo, merchant: boolean): FeedLine[] {
   }
   const who = (e: FeedEvent): string => {
     const place = e.customer ? places.get(e.customer.toLowerCase()) : undefined;
+    if (p.cards) return place === undefined ? "A card" : `Card ${place}`;
     return place === undefined ? "A customer" : `Customer ${place}`;
   };
   const describe = (e: FeedEvent): string | null => {
@@ -227,7 +238,7 @@ export function feedLines(p: Promo, merchant: boolean): FeedLine[] {
         return `${p.hedgeMode ? "Cover" : "Promo"} started. ${merchant ? "You" : p.hedgeMode ? "The business" : "The shop"} paid ${usd(e.amount)}.`;
       case "ClaimRegistered":
         // A cover registers the business itself in the transaction that starts it: not a line of its own.
-        return p.hedgeMode ? null : `${who(e)} covered`;
+        return p.hedgeMode ? null : `${who(e)} ${p.cards ? "ready" : "covered"}`;
       case "Settled": {
         // "Result: the Lions won".
         const what = e.outcomeYes ? won(p) : lost(p);

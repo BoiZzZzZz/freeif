@@ -72,6 +72,13 @@ export const KEYS = {
   mechanics: "freeif.mechanics",
 } as const;
 
+/**
+ * A merchant's claim cards for one promo: the card keys, which exist in this browser and on the printed
+ * cards only. Unlike everything else here, they are worth money: whoever holds a key holds that card.
+ * Scoped by vault, because promo ids start again at 0 on a new vault.
+ */
+export const cardsKey = (vault: string, promoId: string): string => `freeif.cards.${vault.toLowerCase()}.${promoId}`;
+
 export type MyPromo = { id: string; tx: string; at: number };
 
 // Fallbacks are shared constants: a new `[]` on every render would look like a change.

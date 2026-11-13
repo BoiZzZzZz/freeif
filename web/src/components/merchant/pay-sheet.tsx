@@ -173,7 +173,12 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
           const mine: MyPromo = { id: tx.promoId, tx: tx.txHash ?? "", at: Math.floor(Date.now() / 1000) };
           saveLocal(KEYS.promos, [mine, ...readLocal<MyPromo[]>(KEYS.promos, NO_PROMOS)].slice(0, 50));
           setPhase({ name: "paying", line: cover ? "You're covered" : "Promo is live" });
-          router.push(`/promo/${tx.promoId}`);
+          // A promo sold with claim cards goes on to its cards; the keeper says which kind it is.
+          const next = await keeper.promo(tx.promoId).then(
+            (p) => (p.cards ? `/promo/${tx.promoId}/cards` : `/promo/${tx.promoId}`),
+            () => `/promo/${tx.promoId}`,
+          );
+          router.push(next);
           return;
         }
         await sleep(1500);

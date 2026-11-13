@@ -162,8 +162,17 @@ export type Hedge = {
 
 export type Promo = {
   promoId: string;
+  /** The vault the promo is on. Promo ids start again at 0 on a new vault. Absent from keepers before claim cards. */
+  vault?: `0x${string}`;
   status: PromoStatus;
   merchant: string;
+  /** True when the promo's customers are covered by claim cards the merchant prints, not by the claim link. */
+  cards?: boolean;
+  /**
+   * Card promos only: the card addresses registered so far (in order), and how many more wait in the
+   * keeper's line. A card the merchant's browser holds that is in neither still has to be sent.
+   */
+  cardProgress?: { registered: string[]; queued: number } | null;
   eventId: string | null;
   eventTicker: string | null;
   eventTitle: string | null;
@@ -273,6 +282,15 @@ export type Vault = {
   events: FeedEvent[];
 };
 
+/** The keeper's answer to a promo's cards: accepted, and registered one at a time after it. */
+export type CardsAccepted = {
+  promoId: string;
+  cards: number;
+  alreadyRegistered: number;
+  queued: number;
+  waiting: number;
+};
+
 export type ClaimResult = {
   promoId: string;
   customer: string;
@@ -347,6 +365,13 @@ export const keeper = {
 
   /** Covers `customer` on a promo. `userToken` is the login: the keeper asks Circle whose it is. */
   claim: (req: { promoId: string; customer: string; userToken: string }) => call<ClaimResult>("/claims", req),
+
+  /**
+   * Sends a card promo's card addresses (never their keys) with the merchant's login. The keeper checks the
+   * login is the promo's merchant and registers each card after it answers.
+   */
+  sendCards: (promoId: string, cards: string[], userToken: string) =>
+    call<CardsAccepted>(`/promos/${encodeURIComponent(promoId)}/cards`, { cards, userToken }),
 
   /** The vault's books, every promo, and the newest events: the page for liquidity providers. */
   vault: (signal?: AbortSignal) => call<Vault>("/vault", undefined, signal),

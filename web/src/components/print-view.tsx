@@ -1,7 +1,9 @@
 "use client";
 
 // /promo/[id]/print (prep/WIREFRAMES.md section 9.5): the letter-size counter sign, kept at the
-// register. Not a window poster: a QR in the window would let people claim without buying.
+// register. Not a window poster: a QR in the window would let people claim without buying. A card promo's
+// sign is an ad instead: its QR opens the promo's public page, which has nothing to claim, and customers
+// ask for a card when they buy.
 import { QRCodeSVG } from "qrcode.react";
 import { useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
@@ -25,6 +27,34 @@ export function PrintView({ id }: { id: string }) {
   const item = promo.item ?? "Your purchase";
   const plural = /[^s]s$/i.test(item);
   const condition = promo.condition ?? "it happens";
+  if (promo.cards) {
+    return (
+      <main className="mx-auto flex min-h-screen w-full max-w-[720px] flex-col items-center bg-white px-8 py-12 text-center text-black">
+        <div className="no-print mb-8 w-full max-w-[280px]">
+          <Button onClick={() => window.print()}>Print this sign</Button>
+        </div>
+        <p className="num text-[20px] uppercase tracking-[0.2em]">{promo.business ?? "Tonight only"}</p>
+        <h1 className="mt-10 text-[64px] font-semibold uppercase leading-[1.05] tracking-tight">
+          Free if {condition}
+        </h1>
+        <p className="mt-6 text-[32px] font-semibold">Ask for your card</p>
+        <div className="my-12">
+          <QRCodeSVG value={`${origin}/promo/${id}`} size={240} marginSize={0} />
+        </div>
+        <div className="space-y-2 text-[24px] leading-snug">
+          <p>
+            Buy {item.toLowerCase()} and get a card. If {condition}, your card is worth{" "}
+            <span className="num">{usd(promo.payoutPerClaim)}</span>.
+          </p>
+          <p>Scan your card after the game to collect.</p>
+          <p>
+            {promo.maxClaims} card{promo.maxClaims === 1 ? "" : "s"}. While they last.
+          </p>
+        </div>
+        <p className="num mt-auto self-end pt-12 text-[16px]">{origin.replace(/^https?:\/\//, "")}</p>
+      </main>
+    );
+  }
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-[720px] flex-col items-center bg-white px-8 py-12 text-center text-black">
       <div className="no-print mb-8 w-full max-w-[280px]">

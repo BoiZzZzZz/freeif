@@ -442,7 +442,7 @@ function YourPromos() {
         >
           <span className="min-w-0 truncate">{titleOf(p)}</span>
           <span className="num shrink-0 text-[13px] text-ink/60">
-            {p.hedgeMode ? "" : `${p.claimCount} of ${p.maxClaims} · `}
+            {p.hedgeMode ? "" : `${p.claimCount} of ${p.maxClaims}${p.cards ? " cards" : ""} · `}
             {statusLine(p, Math.floor((now || 0) / 1000), true).badge} ›
           </span>
         </Link>

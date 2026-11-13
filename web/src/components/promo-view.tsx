@@ -1,7 +1,9 @@
 "use client";
 
 // /promo/[id] (prep/WIREFRAMES.md section 9): the merchant's dashboard on game night, the public status
-// page, and the proof page. One page; the counter kit shows only to the promo's merchant.
+// page, and the proof page. One page; the counter kit shows only to the promo's merchant. A promo sold
+// with claim cards has no claim code: its merchant sees how many cards are ready, everyone else is told
+// to ask for a card where they bought.
 import Link from "next/link";
 import { QRCodeCanvas, QRCodeSVG } from "qrcode.react";
 import { useRef, useState, useSyncExternalStore } from "react";
@@ -9,10 +11,11 @@ import { SiteFooter, useMechanics } from "@/components/mechanics";
 import { OddsChart } from "@/components/odds-chart";
 import { RuleText } from "@/components/rule-text";
 import { Button } from "@/components/ui/button";
+import type { CardSet } from "@/lib/cards";
 import { explorerAddress, explorerTx, KEEPER_URL } from "@/lib/config";
 import { dayTime, timeOf, usd } from "@/lib/format";
 import type { Promo } from "@/lib/keeper";
-import { KEYS, NO_PROMOS, useLocal, type MyPromo } from "@/lib/local";
+import { cardsKey, KEYS, NO_PROMOS, useLocal, type MyPromo } from "@/lib/local";
 import { feedLines, statusLine, takingCustomers, timeline, titleOf, type TimelineStep } from "@/lib/promo";
 import { useNow } from "@/lib/use-now";
 import { useOdds } from "@/lib/use-odds";
@@ -69,6 +72,8 @@ export function PromoView({ id }: { id: string }) {
   const status = statusLine(promo, now, merchant);
   // A cover pays the business itself: nobody is covered at the counter, so there is no code to scan.
   const cover = promo.hedgeMode;
+  // A card promo's customers hold cards from the shop: there is no code to scan and no claim button.
+  const cards = promo.cards === true && !cover;
   const taking = !cover && takingCustomers(promo, now) === "yes";
   const feed = feedLines(promo, merchant);
   const steps = timeline(promo, merchant);
@@ -120,15 +125,22 @@ export function PromoView({ id }: { id: string }) {
         </dl>
       ) : (
         <dl className="mt-6 grid grid-cols-3 gap-3 border-y border-line py-4">
-          <Number value={`${promo.claimCount} of ${promo.maxClaims}`} label="Customers covered" />
+          <Number value={`${promo.claimCount} of ${promo.maxClaims}`} label={cards ? "Cards ready" : "Customers covered"} />
           <Number value={usd(promo.premiumPaid)} label={merchant ? "You paid" : "The shop paid"} />
-          <Number value={usd(BigInt(promo.payoutPerClaim) * BigInt(promo.claimCount))} label={`Customers get if ${condition}`} />
+          <Number value={usd(BigInt(promo.payoutPerClaim) * BigInt(promo.claimCount))} label={`${cards ? "Cards pay" : "Customers get"} if ${condition}`} />
         </dl>
       )}
 
-      {merchant && taking && <CounterKit id={id} promo={promo} />}
+      {merchant && taking && !cards && <CounterKit id={id} promo={promo} />}
+      {merchant && cards && promo.status === "Open" && <CardsKit id={id} promo={promo} />}
       {steps && <Timeline steps={steps} />}
-      {!merchant && taking && (
+      {!merchant && cards && promo.status === "Open" && (
+        <p className="mt-6 rounded-[10px] border border-line bg-card p-4 text-[16px]">
+          Ask for your card where you bought{promo.item ? ` ${promo.item.toLowerCase()}` : ""}. If {condition}, it is worth{" "}
+          <span className="num">{usd(promo.payoutPerClaim)}</span>: scan it after the game to collect.
+        </p>
+      )}
+      {!merchant && taking && !cards && (
         <Link
           href={`/claim/${id}`}
           className="mt-6 flex h-12 items-center justify-center rounded-[10px] bg-ink px-5 font-medium text-white hover:bg-ink/85"
@@ -279,6 +291,48 @@ function CounterKit({ id, promo }: { id: string; promo: Promo }) {
       </div>
       {/* Drawn off screen at print size, for "Save QR". */}
       <div className="hidden">{origin !== "" && <QRCodeCanvas ref={canvas} value={link} size={1024} marginSize={4} />}</div>
+    </section>
+  );
+}
+
+/** A card promo's merchant: how many of the cards are ready, and where to print them and the sign. */
+function CardsKit({ id, promo }: { id: string; promo: Promo }) {
+  // The cards' keys live in the browser that made them. Nothing is stored under the placeholder key.
+  const set = useLocal<CardSet | null>(promo.vault ? cardsKey(promo.vault, id) : "freeif.cards.none", null);
+  return (
+    <section className="mt-8">
+      <h2 className="label mb-2">Your cards</h2>
+      <div className="space-y-3 rounded-[10px] border border-line bg-card p-4">
+        <p className="text-[15px]">
+          {set ? (
+            <>
+              <span className="num">
+                {promo.claimCount} of {set.keys.length}
+              </span>{" "}
+              cards ready.{set.printedAt === null ? " Not printed yet: they live only in this browser until you print them." : ""}
+            </>
+          ) : promo.claimCount > 0 ? (
+            "Your cards were made on another device. Print them from there."
+          ) : (
+            "Your cards aren't made yet."
+          )}
+        </p>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Link
+            href={`/promo/${id}/cards`}
+            className="flex h-10 items-center justify-center rounded-[10px] bg-ink px-3 text-[14px] font-medium text-white hover:bg-ink/85"
+          >
+            {set ? "Print your cards" : "Make your cards"}
+          </Link>
+          <Link
+            href={`/promo/${id}/print`}
+            target="_blank"
+            className="flex h-10 items-center justify-center rounded-[10px] border border-line bg-card px-3 text-[14px] font-medium hover:border-ink/40"
+          >
+            Print counter sign
+          </Link>
+        </div>
+      </div>
     </section>
   );
 }
