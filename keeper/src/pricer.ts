@@ -4,7 +4,9 @@ import { randomBytes } from "node:crypto";
 import { erc20Abi, keccak256, toBytes, toHex, type Address, type Hex, type PrivateKeyAccount } from "viem";
 import { promoVaultAbi } from "./abi.ts";
 import { quoteDomain, quoteToJson, quoteTypes, type PublicClient, type Quote } from "./chain.ts";
-import { getEvent, isIntervalMarket, priceToBps, toUnix, type GeminiContract, type GeminiEvent } from "./gemini.ts";
+import { getEvent, isIntervalMarket, priceToBps, ruleText, toUnix, type GeminiContract, type GeminiEvent } from "./gemini.ts";
+import { pendingLabel, prunePending, type Label } from "./labels.ts";
+import { displayNames } from "./names.ts";
 import { checkLimits, maxCustomers, price, type Limit, type Price, type PricingParams, type VaultState } from "./pricing.ts";
 import type { Store } from "./store.ts";
 
@@ -20,7 +22,12 @@ export type PriceRequest = {
   claimDeadline?: "start" | "30min" | number;
 };
 
-export type QuoteRequest = PriceRequest & { merchant: Address; hedgeMode?: boolean };
+export type QuoteRequest = PriceRequest & {
+  merchant: Address;
+  hedgeMode?: boolean;
+  /** What is free and the shop's name, for the promo's card. Kept with the quote. */
+  label?: Label;
+};
 
 export type RefusalCode =
   | "bad-request"
@@ -148,8 +155,27 @@ export class Pricer {
     });
 
     const { store } = this.#d;
-    store.data.events[quote.geminiEventId] = { eventId: p.event.id, eventTicker: p.event.ticker, title: p.event.title };
-    store.data.instruments[quote.instrumentSymbol] = { symbol: p.contract.instrumentSymbol, label: p.contract.label };
+    const names = displayNames(p.event, p.contract);
+    store.data.events[quote.geminiEventId] = {
+      eventId: p.event.id,
+      eventTicker: p.event.ticker,
+      title: p.event.title,
+      game: names.game,
+      league: names.league,
+      startTime: names.startTime,
+    };
+    store.data.instruments[quote.instrumentSymbol] = {
+      symbol: p.contract.instrumentSymbol,
+      label: p.contract.label,
+      team: names.team,
+      subject: names.subject,
+      condition: names.condition,
+      rule: ruleText(p.contract.description),
+    };
+    if (req.label && (req.label.item !== "" || req.label.business !== "")) {
+      store.data.pendingLabels[quote.nonce] = pendingLabel(quote, req.label, this.#now());
+      prunePending(store.data.pendingLabels);
+    }
     store.data.liveQuotes[quote.nonce] = {
       maxPayout: p.price.maxPayout.toString(),
       premium: p.price.premium.toString(),
@@ -268,6 +294,10 @@ export class Pricer {
       eventTitle: p.event.title,
       instrumentSymbol: p.contract.instrumentSymbol,
       contractLabel: p.contract.label,
+      /** The words for the card: "Cavaliers at Heat", "the Heat win", the league and the start time. */
+      display: displayNames(p.event, p.contract),
+      /** Gemini's rule for this result, word for word. */
+      rule: ruleText(p.contract.description),
       /** Unix seconds: the promo takes customers until then, and can be settled from then. */
       claimDeadline: p.claimDeadline,
       marketCloseTime: p.marketCloseTime,

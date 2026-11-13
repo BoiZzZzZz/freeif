@@ -1,7 +1,8 @@
 # keeper
 
-One Node process that does four jobs for `PromoVault`:
+One Node process that does five jobs for `PromoVault`:
 
+- **Game list.** Reads Gemini's active game-winner markets league by league and serves them to the merchant form, each team with its chance and the words a customer reads ("the Lions win").
 - **Pricing.** Reads the ask for a result from Gemini's prediction-market API, adds the spread, checks the vault can cover the promo, and signs the EIP-712 quote that `createPromo` checks.
 - **Claim relayer.** Its key is every promo's claim signer, so it is the only address that can register a customer. One claim per email per promo.
 - **Settlement loop.** Every 30 seconds: posts Gemini's result once claims are closed (`settle`), finalizes after the dispute window (`finalize`), pays the customers of a "yes" (`payoutBatch`), and retries payouts whose transfer failed (`retryPayout`).
@@ -41,13 +42,20 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 |---|---|
 | `GET /health` | The vault, the three service addresses, the latest block, and the commit the hosted build was made from |
 | `GET /health/rpc` | Whether each RPC endpoint answers, and how fast |
-| `GET /price?eventTicker=&instrumentSymbol=&payoutPerClaim=&maxClaims=&claimDeadline=` | The price of a promo, unsigned. `breakdown` has `chance`, `mostOwed`, `fee` and `cost`; `maxCustomers` is the most the vault can cover right now; `limit` is `ok` or the limit the request is over |
-| `POST /quote` | Body: the same fields plus `merchant` (and `hedgeMode`). Returns the price plus `quote` and `signature` for `createPromo(quote, signature)`. Good for 90 seconds, for that merchant only. Answers 422 with a reason when the vault cannot take the promo |
+| `GET /games?league=nba` | One league's games that have not started, soonest first: `eventTicker`, `game` ("Cavaliers at Heat"), `startTime`, and for each team its `instrumentSymbol`, `team`, `condition` ("the Heat win"), `chance` and `quotable`. `leagues` lists the leagues (`nfl`, `nba`, `nhl`, `ncaaf`, `ncaam`) |
+| `GET /price?eventTicker=&instrumentSymbol=&payoutPerClaim=&maxClaims=&claimDeadline=` | The price of a promo, unsigned. `breakdown` has `chance`, `mostOwed`, `fee` and `cost`; `maxCustomers` is the most the vault can cover right now; `limit` is `ok` or the limit the request is over; `display` has the words for the card (`game`, `team`, `subject`, `condition`, `league`, `startTime`) and `rule` is Gemini's rule for the result |
+| `POST /quote` | Body: the same fields plus `merchant` (and `hedgeMode`, and `item` and `business` for the promo's card). Returns the price plus `quote` and `signature` for `createPromo(quote, signature)`. Good for 90 seconds, for that merchant only. Answers 422 with a reason when the vault cannot take the promo |
 | `POST /claims` | Body: `promoId`, `customer`, `email`. Registers the customer on chain. 409 when the email has already claimed with another wallet |
-| `GET /promos/:id` | The promo as the chain has it, with the event and result names behind its two hashes |
+| `GET /promos/:id` | The promo as the chain has it, with the event and result names behind its two hashes, the words for the card, `item` and `business`, and `txs`: the transactions the keeper sent for it. With `?customer=0x...` it adds `customer`: that address's place in line, and whether it has been paid |
 | `GET /intervals?series=BTC05M` | The next windows of a 5 or 15-minute crypto market (the test loop) |
 
 `claimDeadline` is `start` (the default: the promo takes customers until the event starts), `30min` (until 30 minutes before) or a unix time no later than the start.
+
+## The game list and the words on the card
+
+- Gemini lists every market of a game as its own event, and a page of 100 events is 3 to 12 MB. The keeper asks one league at a time with Gemini's `search` filter, keeps the events whose ticker ends in `-M` (the game's winner), and holds each league's list in memory. A list older than two minutes is served as it is while a new one is read, so only the first read after a start waits for Gemini; the keeper does that read itself when it starts.
+- A team can be picked when it has both a bid and an ask and is not too likely. An empty book shows an ask of 0.02 with no bid; that is not a 2% chance.
+- Names come from Gemini, never from the merchant: a pro team goes by its nickname ("Miami" with the participant "Miami Heat" is "the Heat"), a college by its own name. What a merchant does send, with the quote request, is what is free and the shop's name (`item`, `business`, 40 characters each). They are tied to the promo the first time it is read: a promo can only carry a quote's exact merchant, amounts and deadline if the pricer signed that quote.
 
 ## Pricing rules
 
@@ -79,6 +87,8 @@ Run one keeper per vault. A second one with the same keys does no harm to the va
 
 | File | What it holds |
 |---|---|
+| `src/games.ts`, `src/names.ts` | The game list for the merchant form, and the words for a game and a team |
+| `src/labels.ts` | What is free and the shop's name, kept with the quote until its promo exists |
 | `src/pricing.ts` | The pricing math and the two limits, as pure functions |
 | `src/pricer.ts` | The pricing service: Gemini's ask, the vault's state, the signed quote |
 | `src/relayer.ts` | `registerClaim`, one claim per email |

@@ -4,6 +4,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { promoVaultAbi } from "./abi.ts";
 import { makePublicClient, makeWalletClient } from "./chain.ts";
 import * as config from "./config.ts";
+import { Games } from "./games.ts";
 import { Keeper } from "./keeper.ts";
 import { Pricer } from "./pricer.ts";
 import { Relayer } from "./relayer.ts";
@@ -45,11 +46,15 @@ const pricer = new Pricer({
   store,
 });
 const keeper = new Keeper({ client, wallet: oracleWallet, vault, store });
+const games = new Games({ spreadBps: config.pricingParams().spreadBps, minLeadSeconds: timing.minClaimWindowSeconds });
 
-const app = makeApp({ client, vault, pricer, relayer, oracle: keeper.address, store });
+const app = makeApp({ client, vault, pricer, games, relayer, oracle: keeper.address, store });
 const server = serve({ fetch: app.fetch, port: config.port(), hostname: "0.0.0.0" }, (info) => {
   console.log(`[server] listening on ${info.port}; vault ${vault}; RPCs: ${config.rpcUrls().length}`);
 });
+
+// Read Gemini's game lists now, so the first merchant to open the form does not wait for them.
+void games.prewarm();
 
 const stop = new AbortController();
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

@@ -12,7 +12,13 @@ export type GeminiContract = {
   /** Present once Gemini has settled the contract: "yes" or "no". */
   resolutionSide?: string;
   resolvedAt?: string;
+  /** Which team of a game this contract is: "home" or "away". */
+  sportsSide?: string;
+  /** The rule Gemini settles the contract by, as a rich-text document. */
+  description?: unknown;
 };
+
+export type GeminiParticipant = { name: string; abbreviation?: string; side?: string };
 
 export type GeminiEvent = {
   id: string;
@@ -26,6 +32,10 @@ export type GeminiEvent = {
   resolvedAt?: string;
   contracts: GeminiContract[];
   eventTags?: { slug: string }[];
+  /** The two teams of a game, each with its full name and its side. */
+  participants?: GeminiParticipant[];
+  /** The league, for example `{ name: "Pro Football" }`. */
+  subcategory?: { name: string };
 };
 
 type Page = { data: GeminiEvent[]; pagination: { limit: number; offset: number; total: number } };
@@ -38,10 +48,10 @@ export class GeminiError extends Error {
   }
 }
 
-async function get<T>(path: string): Promise<T> {
+async function get<T>(path: string, timeoutMs = 15_000): Promise<T> {
   const res = await fetch(`${geminiBase()}${path}`, {
     headers: { accept: "application/json" },
-    signal: AbortSignal.timeout(15_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new GeminiError(res.status, `Gemini ${res.status} on ${path}`);
   return (await res.json()) as T;
@@ -63,13 +73,17 @@ export async function getEvent(ticker: string): Promise<GeminiEvent | null> {
 export async function listEvents(query: {
   status: "active" | "settled";
   category?: string;
+  /** Gemini matches this against tickers and titles; it must be at least three characters. */
+  search?: string;
   limit?: number;
   offset?: number;
 }): Promise<Page> {
   const params = new URLSearchParams({ status: query.status, limit: String(query.limit ?? 100) });
   if (query.category) params.set("category", query.category);
+  if (query.search) params.set("search", query.search);
   if (query.offset) params.set("offset", String(query.offset));
-  return get<Page>(`/v1/prediction-markets/events?${params}`);
+  // A page of 100 sports events can be 12 MB and take several seconds.
+  return get<Page>(`/v1/prediction-markets/events?${params}`, 40_000);
 }
 
 const INTERVAL_TICKER = /^([A-Z]+)(05|15)M(\d{10})$/;
@@ -115,3 +129,19 @@ export function priceToBps(price: string | undefined): number | null {
 }
 
 export const toUnix = (iso: string): number => Math.floor(new Date(iso).getTime() / 1000);
+
+/** The plain text of a contract's rule. Gemini sends it as a tree of nodes with the words in `value`. */
+export function ruleText(description: unknown): string {
+  const parts: string[] = [];
+  const walk = (node: unknown): void => {
+    if (typeof node === "string") parts.push(node);
+    else if (Array.isArray(node)) node.forEach(walk);
+    else if (node !== null && typeof node === "object") {
+      const { value, content } = node as { value?: unknown; content?: unknown };
+      if (typeof value === "string") parts.push(value);
+      walk(content);
+    }
+  };
+  walk(description);
+  return parts.join(" ").replace(/\s+/g, " ").trim();
+}

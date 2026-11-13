@@ -152,7 +152,15 @@ test("signQuote_signsExactlyWhatCreatePromoChecks", async () => {
     }),
   );
   // The keeper will need the plain strings behind the two hashes to settle the promo.
-  assert.deepEqual(store.data.events[q.geminiEventId], { eventId: "362998", eventTicker: wings.eventTicker, title: "Colts at Vikings" });
+  // With them it keeps the words for the card: this fake event has no teams, so the game is its title.
+  assert.deepEqual(store.data.events[q.geminiEventId], {
+    eventId: "362998",
+    eventTicker: wings.eventTicker,
+    title: "Colts at Vikings",
+    game: "Colts at Vikings",
+    league: null,
+    startTime: NOW + 3 * 3600,
+  });
   assert.equal(store.data.instruments[q.instrumentSymbol]?.symbol, wings.instrumentSymbol);
 });
 
@@ -261,4 +269,34 @@ test("signQuote_requestsAtTheSameTime_cannotBothTakeTheSameRoom", async () => {
   const big = { ...wings, maxClaims: 280, merchant: MERCHANT };
   const results = await Promise.allSettled([pricer.signQuote(big), pricer.signQuote(big)]);
   assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
+});
+
+test("getPrice_game_carriesTheWordsForTheCard", async () => {
+  const event = game({
+    subcategory: { name: "Pro Football" },
+    participants: [{ name: "Minnesota Vikings", side: "home" }],
+  });
+  event.contracts[0]!.label = "Minnesota";
+  event.contracts[0]!.sportsSide = "home";
+  event.contracts[0]!.description = { content: [{ value: "If Minnesota wins, this market will resolve to Yes." }] };
+  const p = await setup(event).pricer.getPrice(wings);
+  assert.equal(p.display.team, "Vikings");
+  assert.equal(p.display.condition, "the Vikings win");
+  assert.equal(p.display.league, "Pro Football");
+  assert.equal(p.display.startTime, NOW + 3 * 3600);
+  assert.equal(p.rule, "If Minnesota wins, this market will resolve to Yes.");
+});
+
+test("signQuote_label_isKeptUnderTheQuotesNonce", async () => {
+  const { pricer, store } = setup(game());
+  const res = await pricer.signQuote({ ...wings, merchant: MERCHANT, label: { item: "Wings", business: "Tony's Pizza" } });
+  const kept = store.data.pendingLabels[res.quote.nonce];
+  assert.equal(kept?.item, "Wings");
+  assert.equal(kept?.business, "Tony's Pizza");
+  assert.equal(kept?.premium, res.quote.premium);
+  assert.equal(kept?.merchant, MERCHANT);
+
+  // A quote with nothing to remember keeps nothing.
+  const bare = await pricer.signQuote({ ...wings, maxClaims: 10, merchant: MERCHANT, label: { item: "", business: "" } });
+  assert.equal(store.data.pendingLabels[bare.quote.nonce], undefined);
 });

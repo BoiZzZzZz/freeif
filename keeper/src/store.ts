@@ -1,12 +1,30 @@
 // What the keeper remembers between restarts, in one JSON file. The chain is the source of truth for
 // promos and money; this file only holds what the chain does not: the plain strings behind the hashes
-// in a promo, the quotes that are still usable, which emails have claimed, and the keeper's own tx hashes.
+// in a promo, the quotes that are still usable, which emails have claimed, what each promo gives away and
+// for which shop, and the keeper's own tx hashes.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Address, Hex } from "viem";
+import type { Label, PendingLabel } from "./labels.ts";
 
-export type EventRecord = { eventId: string; eventTicker: string; title: string };
-export type InstrumentRecord = { symbol: string; label: string };
+/** `game`, `league` and `startTime` are the words for the card (names.ts); older records lack them. */
+export type EventRecord = {
+  eventId: string;
+  eventTicker: string;
+  title: string;
+  game?: string;
+  league?: string | null;
+  startTime?: number | null;
+};
+/** `team`, `subject`, `condition` and `rule` are the words for the card; older records lack them. */
+export type InstrumentRecord = {
+  symbol: string;
+  label: string;
+  team?: string;
+  subject?: string;
+  condition?: string;
+  rule?: string;
+};
 export type LiveQuote = { maxPayout: string; premium: string; expiry: number };
 export type TxRecord = { at: number; promoId: string; action: string; hash: Hex };
 
@@ -19,11 +37,23 @@ type Data = {
   liveQuotes: Record<Hex, LiveQuote>;
   /** promo id => sha256(email) => the customer address that email claimed with. */
   claims: Record<string, Record<string, Address>>;
+  /** quote nonce => what is free and the shop's name, until the quote's promo is first read. */
+  pendingLabels: Record<Hex, PendingLabel>;
+  /** promo id => what is free and the shop's name. */
+  promoLabels: Record<string, Label>;
   /** The most recent transactions the keeper and the relayer sent. */
   txs: TxRecord[];
 };
 
-const empty = (): Data => ({ events: {}, instruments: {}, liveQuotes: {}, claims: {}, txs: [] });
+const empty = (): Data => ({
+  events: {},
+  instruments: {},
+  liveQuotes: {},
+  claims: {},
+  pendingLabels: {},
+  promoLabels: {},
+  txs: [],
+});
 const MAX_TXS = 2000;
 
 export class Store {
