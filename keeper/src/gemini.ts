@@ -114,6 +114,45 @@ export async function getBook(symbol: string): Promise<TopOfBook | null> {
   }
 }
 
+/** A contract's book as the pricing service reads it: the best bid, and every offer, cheapest first. */
+export type Depth = {
+  /** The best bid as Gemini writes prices ("0.42"). Null with nobody bidding. */
+  bid: string | null;
+  /** `amount` is in contracts ("6015.12"); one pays $1 on a "yes". */
+  asks: { price: string; amount: string }[];
+};
+
+/** Reads `{ bids: [{ price }], asks: [{ price, amount }] }`. An order that is not a price and an amount is left out. */
+export function depthOf(body: unknown): Depth {
+  const { asks } = (body !== null && typeof body === "object" ? body : {}) as { asks?: unknown };
+  const offers = (Array.isArray(asks) ? asks : []).flatMap((order: unknown) => {
+    const { price, amount } = (order !== null && typeof order === "object" ? order : {}) as { price?: unknown; amount?: unknown };
+    return typeof price === "string" && typeof amount === "string" ? [{ price, amount }] : [];
+  });
+  return { bid: topOfBook(body).bid, asks: offers.sort((a, b) => Number(a.price) - Number(b.price)) };
+}
+
+/**
+ * Every offer on one contract's book, with the best bid: what a promo is priced on. The same exchange
+ * route as `getBook`; `limit_asks=0` asks for the whole side (a game has a handful of prices on it).
+ * Null when Gemini has no such symbol.
+ */
+export async function getDepth(symbol: string): Promise<Depth | null> {
+  try {
+    return depthOf(await get<unknown>(`/v1/book/${encodeURIComponent(symbol)}?limit_bids=1&limit_asks=0`, 10_000));
+  } catch (err) {
+    if (err instanceof GeminiError && (err.status === 400 || err.status === 404)) return null;
+    throw err;
+  }
+}
+
+/** Contracts as Gemini writes them ("6015.12") in USDC base units of payout: one contract pays $1. Null when it is not an amount. */
+export function contractsToUnits(amount: string): bigint | null {
+  const match = /^(\d+)(?:\.(\d{1,6}))?\d*$/.exec(amount);
+  if (!match) return null;
+  return BigInt(match[1]!) * 1_000_000n + BigInt((match[2] ?? "").padEnd(6, "0"));
+}
+
 const INTERVAL_TICKER =/^([A-Z]+)(05|15)M(\d{10})$/;
 
 /** 5 and 15-minute crypto markets. They are the test loop: quotable while the window is running. */

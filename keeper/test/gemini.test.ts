@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { intervalTicker, isIntervalMarket, priceToBps, toUnix, upcomingIntervalTickers } from "../src/gemini.ts";
+import { contractsToUnits, depthOf, intervalTicker, isIntervalMarket, priceToBps, toUnix, upcomingIntervalTickers } from "../src/gemini.ts";
 
 test("intervalTicker_carriesTheCloseTimeInUtc", () => {
   assert.equal(intervalTicker("BTC05M", new Date("2026-10-25T06:45:00Z")), "BTC05M2610250645");
@@ -32,6 +32,40 @@ test("priceToBps_readsAPrice_andRefusesWhatIsNotOne", () => {
   assert.equal(priceToBps("0"), null);
   assert.equal(priceToBps("1"), null);
   assert.equal(priceToBps("abc"), null);
+});
+
+test("depthOf_readsTheBestBidAndEveryOffer_cheapestFirst", () => {
+  // What `GET /v1/book/{symbol}?limit_bids=1&limit_asks=0` answered for a game on Nov 13.
+  const body = {
+    bids: [{ price: "0.45", amount: "1000.0", timestamp: "1794595571" }],
+    asks: [
+      { price: "0.47", amount: "600.0", timestamp: "1794595571" },
+      { price: "0.46", amount: "5943.0", timestamp: "1794595571" },
+    ],
+  };
+  assert.deepEqual(depthOf(body), {
+    bid: "0.45",
+    asks: [
+      { price: "0.46", amount: "5943.0" },
+      { price: "0.47", amount: "600.0" },
+    ],
+  });
+  // A settled contract has an empty book; an answer that is not a book has nothing in it.
+  assert.deepEqual(depthOf({ bids: [], asks: [] }), { bid: null, asks: [] });
+  assert.deepEqual(depthOf("nope"), { bid: null, asks: [] });
+  assert.deepEqual(depthOf({ asks: [{ price: 0.4, amount: "5" }, null, { price: "0.4" }] }), { bid: null, asks: [] });
+});
+
+test("contractsToUnits_oneContractPaysADollar", () => {
+  assert.equal(contractsToUnits("6015.12"), 6_015_120_000n);
+  assert.equal(contractsToUnits("100.0"), 100_000_000n);
+  assert.equal(contractsToUnits("9"), 9_000_000n);
+  assert.equal(contractsToUnits("0.01"), 10_000n);
+  // More decimals than a dollar has base units are cut off, never rounded up.
+  assert.equal(contractsToUnits("1.23456789"), 1_234_567n);
+  assert.equal(contractsToUnits(""), null);
+  assert.equal(contractsToUnits("-5"), null);
+  assert.equal(contractsToUnits("1e3"), null);
 });
 
 test("toUnix_readsGeminisTimestamps", () => {

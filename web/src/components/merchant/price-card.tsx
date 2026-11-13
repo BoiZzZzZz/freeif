@@ -171,6 +171,7 @@ function HowSheet({ open, onClose, price, mechanics }: { open: boolean; onClose:
           <Fact label="Source" value="Gemini Prediction Markets API" />
           <Fact label="Instrument" value={price.instrumentSymbol} />
           <Fact label="Best ask" value={`${m.bestAsk ?? "none"} · bid ${m.bestBid ?? "none"} · last trade ${m.lastTradePrice ?? "none"} · ${timeOf(m.askFetchedAt)}`} />
+          <Fact label="Offers" value={offersLine(m.offers ?? [], m.covered ?? b.mostOwed, b.mostOwed)} />
           <Fact label="Spread" value={`${m.spreadBps} bps${m.thin ? " (thin book: priced on the highest price it shows)" : ""} · loading ${usd(m.loading)}`} />
           <Fact label="Quote" value={`signed by pricer ${shortAddress(m.pricer)}, valid ${m.quoteTtlSeconds} s`} />
           <Fact label="On pay" value={`${usd(b.mostOwed)} is locked on Arc until the result`} />
@@ -179,6 +180,15 @@ function HowSheet({ open, onClose, price, mechanics }: { open: boolean; onClose:
       )}
     </Sheet>
   );
+}
+
+/** Gemini's offers for the result, and how much of this promo's payout they cover (the depth rule). */
+function offersLine(offers: [string, string][], covered: string, mostOwed: string): string {
+  if (offers.length === 0) return "none";
+  const list = offers.map(([at, contracts]) => `${Number(contracts).toLocaleString("en-US")} at ${at}`).join(" · ");
+  return BigInt(covered) >= BigInt(mostOwed)
+    ? `${list}. They cover all ${usd(mostOwed)}.`
+    : `${list}. They cover ${usd(covered)} of ${usd(mostOwed)}; the rest is priced at the dearest one, with the wider spread.`;
 }
 
 function Fact({ label, value }: { label: string; value: string }) {

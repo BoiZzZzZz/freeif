@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { keccak256, toBytes, verifyTypedData, type Address, type Hex } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { quoteDomain, quoteFromJson, quoteTypes, type PublicClient } from "../src/chain.ts";
-import type { GeminiEvent } from "../src/gemini.ts";
+import type { Depth, GeminiEvent } from "../src/gemini.ts";
 import { Pricer, Refusal, type RefusalCode } from "../src/pricer.ts";
 import type { PricingParams } from "../src/pricing.ts";
 import { Store } from "../src/store.ts";
@@ -70,7 +70,11 @@ const window5m = (closeIn: number): GeminiEvent => ({
 
 type Chain = { balance: bigint; locked: bigint; paused: boolean; used: Set<Hex> };
 
-function setup(event: GeminiEvent | null, chain: Partial<Chain> = {}) {
+/**
+ * `depth` is the contract's book on Gemini. Left out, it is the event's own best bid and best ask with
+ * far more offered at the ask than any test asks for, so the price is the ask.
+ */
+function setup(event: GeminiEvent | null, chain: Partial<Chain> = {}, depth?: Depth | null) {
   const state: Chain = { balance: 20_000n * USDC, locked: 0n, paused: false, used: new Set(), ...chain };
   const clock = { now: NOW };
   const client = {
@@ -93,6 +97,11 @@ function setup(event: GeminiEvent | null, chain: Partial<Chain> = {}) {
     store,
     now: () => clock.now,
     fetchEvent: async () => event,
+    fetchDepth: async (symbol) => {
+      if (depth !== undefined) return depth;
+      const prices = event?.contracts.find((c) => c.instrumentSymbol === symbol)?.prices;
+      return { bid: prices?.bestBid ?? null, asks: prices?.bestAsk ? [{ price: prices.bestAsk, amount: "1000000.0" }] : [] };
+    },
   });
   return { pricer, state, clock, store, account };
 }
@@ -263,6 +272,65 @@ test("signQuote_aThinBook_signsThePriceWithTheWiderSpread_andKeepsItsChanceForTh
   // 35% of 4,000 is 1,400; at 15% the premium is 1,610.
   assert.equal(res.quote.premium, "1610000000");
   assert.deepEqual(store.data.pendingOdds[res.quote.nonce], [NOW, 3500, null, 3500]);
+});
+
+test("getPrice_aSmallOfferAtTheTop_doesNotSetThePriceOfABiggerPromo", async () => {
+  // Ten contracts are offered at 0.25 and five hundred at 0.35. A promo that can pay $400 would buy the
+  // ten and 390 of the rest: $139 for $400 of payout.
+  const book: Depth = { bid: "0.24", asks: [{ price: "0.25", amount: "10.0" }, { price: "0.35", amount: "500.0" }] };
+  const p = await setup(game(), {}, book).pricer.getPrice({ ...wings, maxClaims: 20 });
+  assert.equal(p.breakdown.mostOwed, "400000000");
+  assert.equal(p.breakdown.expectedLoss, "139000000");
+  assert.equal(p.breakdown.chance, 0.3475);
+  assert.equal(p.breakdown.cost, "145950000");
+  assert.deepEqual([p.mechanics.thin, p.mechanics.spreadBps, p.mechanics.covered], [false, 500, "400000000"]);
+  assert.deepEqual(p.mechanics.offers, [["0.25", "10.0"], ["0.35", "500.0"]]);
+  // A promo small enough for the ten contracts is priced on them alone.
+  const small = await setup(game(), {}, book).pricer.getPrice({ ...wings, payoutPerClaim: 5n * USDC, maxClaims: 2 });
+  assert.equal(small.breakdown.chance, 0.25);
+});
+
+test("getPrice_aPayoutPastTheOffers_carriesTheWiderSpreadOnThatPart", async () => {
+  // Gemini's Austin temperature book on Nov 13: 100 offered at 0.37, 9 at 0.42, a bid of 0.32. A payout
+  // of $250 buys all 109 for $40.78; the other 141 cannot be hedged and are priced at 0.42, $59.22.
+  const book: Depth = { bid: "0.32", asks: [{ price: "0.37", amount: "100.0" }, { price: "0.42", amount: "9.0" }] };
+  const p = await setup(game(), {}, book).pricer.getPrice({ ...wings, payoutPerClaim: 250n * USDC, maxClaims: 1 });
+  assert.equal(p.breakdown.expectedLoss, "100000000");
+  assert.equal(p.breakdown.chance, 0.4);
+  assert.equal(p.mechanics.covered, "109000000");
+  // 5% of $40.78 and 15% of $59.22 is $10.92 on $100: 10.93% once rounded up.
+  assert.deepEqual([p.mechanics.thin, p.mechanics.spreadBps], [false, 1093]);
+  assert.equal(p.breakdown.cost, "110930000");
+});
+
+test("getPrice_anOfferFarAboveTheBid_isNotPartOfTheMarket", async () => {
+  // 150 contracts offered at 0.99 against a bid of 0.45 are nobody's price for the result.
+  const book: Depth = { bid: "0.45", asks: [{ price: "0.46", amount: "50.0" }, { price: "0.99", amount: "150.0" }] };
+  const p = await setup(game(), {}, book).pricer.getPrice({ ...wings, payoutPerClaim: 100n * USDC, maxClaims: 1 });
+  assert.equal(p.breakdown.chance, 0.46);
+  assert.equal(p.mechanics.covered, "50000000");
+  // Half is covered at 5%, half is past the offers at 15%.
+  assert.equal(p.mechanics.spreadBps, 1000);
+});
+
+test("getPrice_theBookIsThePrice_notTheEventsOwnNumbers", async () => {
+  // The event still says 0.38 against 0.39; the book has moved to 0.44 against 0.45.
+  const p = await setup(game(), {}, { bid: "0.44", asks: [{ price: "0.45", amount: "9000.0" }] }).pricer.getPrice(wings);
+  assert.equal(p.breakdown.chance, 0.45);
+  assert.deepEqual([p.mechanics.bestBid, p.mechanics.bestAsk], ["0.44", "0.45"]);
+  // No book at all (Gemini does not know the symbol) is no price.
+  await refusal(setup(game(), {}, null).pricer.getPrice(wings), "no-price");
+});
+
+test("getPrice_maxPayout_isTheMostOnePromoCouldPay", async () => {
+  // 20,000 free, 20% cap, 90% headroom: 3,600 at risk. A dollar of payout at 0.39 plus 5% leaves
+  // 59.05 cents at risk: 6,096.54 costs 2,496.54 (rounded up to the cent) and puts exactly 3,600 at risk.
+  const p = await setup(game()).pricer.getPrice(wings);
+  assert.equal(p.maxPayout, "6096540000");
+  const one = await setup(game()).pricer.getPrice({ ...wings, payoutPerClaim: 6_096_540_000n, maxClaims: 1 });
+  assert.deepEqual([one.limit, one.breakdown.cost], ["ok", "2496540000"]);
+  const over = await setup(game()).pricer.getPrice({ ...wings, payoutPerClaim: 6_096_550_000n, maxClaims: 1 });
+  assert.equal(over.limit, "exposure");
 });
 
 test("signQuote_overCapacity_saysHowManyCustomersFit", async () => {

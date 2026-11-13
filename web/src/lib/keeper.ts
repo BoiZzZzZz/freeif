@@ -63,16 +63,22 @@ export type Price = {
   marketCloseTime: number;
   breakdown: { chance: number; mostOwed: string; expectedLoss: string; fee: string; cost: string };
   maxCustomers: number;
+  /** The most one promo on this result could pay in all right now, in base units. */
+  maxPayout?: string;
   limit: "ok" | "exposure" | "ceiling" | "too-likely";
   mechanics: {
     bestAsk: string | null;
     bestBid: string | null;
     lastTradePrice: string | null;
     askFetchedAt: number;
-    /** The spread this price carries: the usual one, or the wider one of a thin book. */
+    /** The spread this price carries: the usual one, the wider one of a thin book, or a mix when the offers cover part of the payout. */
     spreadBps: number;
     /** True when the book is not a market (a side is missing, or its sides are far apart). */
     thin?: boolean;
+    /** How much of the payout Gemini's offers cover, in base units. */
+    covered?: string;
+    /** The cheapest offers on Gemini's book, each `[price, contracts]`. One contract pays $1. */
+    offers?: [string, string][];
     loading: string;
     utilizationBps: number;
     maxLockedBps: number;

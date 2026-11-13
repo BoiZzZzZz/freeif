@@ -4,11 +4,34 @@ import { randomBytes } from "node:crypto";
 import { erc20Abi, keccak256, toBytes, toHex, type Address, type Hex, type PrivateKeyAccount } from "viem";
 import { promoVaultAbi } from "./abi.ts";
 import { quoteDomain, quoteToJson, quoteTypes, type PublicClient, type Quote } from "./chain.ts";
-import { getEvent, isIntervalMarket, priceToBps, ruleText, toUnix, type GeminiContract, type GeminiEvent } from "./gemini.ts";
+import {
+  contractsToUnits,
+  getDepth,
+  getEvent,
+  isIntervalMarket,
+  priceToBps,
+  ruleText,
+  toUnix,
+  type Depth,
+  type GeminiContract,
+  type GeminiEvent,
+} from "./gemini.ts";
 import { pendingLabel, prunePending, type Label } from "./labels.ts";
 import { displayNames } from "./names.ts";
 import { keepPending } from "./odds.ts";
-import { chanceOf, checkLimits, forBook, maxCustomers, price, type Limit, type Price, type PricingParams, type VaultState } from "./pricing.ts";
+import {
+  CENT,
+  checkLimits,
+  largest,
+  price,
+  readingFor,
+  type DeepBook,
+  type Limit,
+  type Price,
+  type PricingParams,
+  type Reading,
+  type VaultState,
+} from "./pricing.ts";
 import type { Store } from "./store.ts";
 
 export type PriceRequest = {
@@ -71,16 +94,34 @@ type Deps = {
   now?: () => number;
   /** Replaceable in tests. */
   fetchEvent?: (ticker: string) => Promise<GeminiEvent | null>;
+  /** The contract's book with every offer on it. Replaceable in tests. */
+  fetchDepth?: (symbol: string) => Promise<Depth | null>;
 };
+
+/** The search for the most one promo could pay stops at ten million dollars. */
+const MOST_CENTS = 1_000_000_000;
+
+/** Gemini's book in the pricing math's units. The last trade comes from the event: the book route has none. */
+function bookOf(depth: Depth | null, contract: GeminiContract): DeepBook {
+  return {
+    bid: priceToBps(depth?.bid ?? undefined),
+    asks: (depth?.asks ?? []).flatMap((offer) => {
+      const priceBps = priceToBps(offer.price);
+      const size = contractsToUnits(offer.amount);
+      return priceBps !== null && size !== null && size > 0n ? [{ priceBps, size }] : [];
+    }),
+    last: priceToBps(contract.prices?.lastTradePrice),
+  };
+}
 
 type Prepared = {
   event: GeminiEvent;
   contract: GeminiContract;
-  /** The chance the price is made on, in 10,000. */
-  chanceBps: number;
-  /** True when the book is not a market: the price carries the wider spread. */
-  thin: boolean;
-  spreadBps: number;
+  /** The book the price is made on: Gemini's best bid and every offer. */
+  depth: Depth | null;
+  book: DeepBook;
+  /** The chance and the spread for a promo of this size, and how much of it the offers cover. */
+  reading: Reading;
   fetchedAt: number;
   claimDeadline: number;
   marketCloseTime: number;
@@ -88,6 +129,8 @@ type Prepared = {
   price: Price;
   limit: Limit;
   maxCustomers: number;
+  /** The most one promo on this result could pay right now, whatever it pays each customer. */
+  maxPayout: bigint;
 };
 
 export class Pricer {
@@ -182,12 +225,7 @@ export class Pricer {
       prunePending(store.data.pendingLabels);
     }
     // The price this quote was made on is the first point of the promo's chart, if the quote is used.
-    keepPending(store.data.pendingOdds, quote.nonce, [
-      p.fetchedAt,
-      p.chanceBps,
-      priceToBps(p.contract.prices?.bestBid),
-      priceToBps(p.contract.prices?.bestAsk),
-    ]);
+    keepPending(store.data.pendingOdds, quote.nonce, [p.fetchedAt, p.reading.chanceBps, p.book.bid, p.book.asks[0]?.priceBps ?? null]);
     store.data.liveQuotes[quote.nonce] = {
       maxPayout: p.price.maxPayout.toString(),
       premium: p.price.premium.toString(),
@@ -204,7 +242,10 @@ export class Pricer {
       throw new Refusal("bad-request", "The number of customers must be at least 1.");
     }
 
-    const event = await (this.#d.fetchEvent ?? getEvent)(req.eventTicker);
+    const [event, depth] = await Promise.all([
+      (this.#d.fetchEvent ?? getEvent)(req.eventTicker),
+      (this.#d.fetchDepth ?? getDepth)(req.instrumentSymbol),
+    ]);
     const fetchedAt = this.#now();
     if (!event) throw new Refusal("unknown-event", "We could not find this event.");
     const contract = event.contracts.find((c) => c.instrumentSymbol === req.instrumentSymbol);
@@ -213,16 +254,12 @@ export class Pricer {
       throw new Refusal("market-closed", "This event is no longer open.");
     }
 
-    // The chance comes from the ask of a book that is a market. A thin book (a side missing, or the two
-    // sides far apart) is priced on the highest price it shows, with the wider spread, and only when
-    // there has been a trade.
-    const read = chanceOf({
-      bid: priceToBps(contract.prices?.bestBid),
-      ask: priceToBps(contract.prices?.bestAsk),
-      last: priceToBps(contract.prices?.lastTradePrice),
-    });
-    if (read === null) throw new Refusal("no-price", "There is no price for this result right now.");
-    const { chanceBps, thin } = read;
+    // The price is what the promo's payout would cost on Gemini's book, offer by offer (the depth rule).
+    // A book that is not a market (a side missing, or the two sides far apart) is priced on the highest
+    // price it shows, with the wider spread, and only when there has been a trade.
+    const book = bookOf(depth, contract);
+    const reading = readingFor(book, req.payoutPerClaim * BigInt(req.maxClaims), this.#d.params);
+    if (reading === null) throw new Refusal("no-price", "There is no price for this result right now.");
 
     // The latest moment a promo may take customers: kickoff for a game. An interval market (the test loop)
     // has no kickoff worth waiting for, so it takes customers until shortly before it closes.
@@ -246,21 +283,29 @@ export class Pricer {
     }
 
     const vault = await this.#readVault(now);
-    const params = forBook(this.#d.params, thin);
-    const computed = price(chanceBps, req.payoutPerClaim, req.maxClaims, vault, params);
+    // A promo of another size costs another price per dollar: more customers reach deeper offers.
+    const at = (payoutPerClaim: bigint, maxClaims: number) => {
+      const r = readingFor(book, payoutPerClaim * BigInt(maxClaims), this.#d.params);
+      if (r === null) return null;
+      const params = { ...this.#d.params, spreadBps: r.spreadBps };
+      const computed = price(r.chanceBps, payoutPerClaim, maxClaims, vault, params);
+      return { computed, limit: checkLimits(computed, vault, params) };
+    };
+    const here = at(req.payoutPerClaim, req.maxClaims)!;
     return {
       event,
       contract,
-      chanceBps,
-      thin,
-      spreadBps: params.spreadBps,
+      depth,
+      book,
+      reading,
       fetchedAt,
       claimDeadline,
       marketCloseTime,
       vault,
-      price: computed,
-      limit: checkLimits(computed, vault, params),
-      maxCustomers: maxCustomers(chanceBps, req.payoutPerClaim, vault, params),
+      price: here.computed,
+      limit: here.limit,
+      maxCustomers: largest((n) => at(req.payoutPerClaim, n)?.limit === "ok"),
+      maxPayout: BigInt(largest((cents) => at(BigInt(cents) * CENT, 1)?.limit === "ok", MOST_CENTS)) * CENT,
     };
   }
 
@@ -325,8 +370,8 @@ export class Pricer {
       marketCloseTime: p.marketCloseTime,
       /** The three lines of the price card, in USDC base units (6 decimals). */
       breakdown: {
-        /** The chance of a "yes", from Gemini's ask: 0.39 is 39%. */
-        chance: p.chanceBps / 10_000,
+        /** The chance of a "yes": what a dollar of this payout costs on Gemini's offers. 0.39 is 39%. */
+        chance: p.reading.chanceBps / 10_000,
         mostOwed: p.price.maxPayout.toString(),
         expectedLoss: p.price.expectedLoss.toString(),
         fee: p.price.fee.toString(),
@@ -334,17 +379,25 @@ export class Pricer {
       },
       /** The largest number of customers the vault can cover on this result at this payout right now. */
       maxCustomers: p.maxCustomers,
+      /** The most one promo on this result could pay in all right now: the most a business can buy in hedge mode. */
+      maxPayout: p.maxPayout.toString(),
       /** "ok", or the limit this request is over: "exposure", "ceiling" or "too-likely". */
       limit: p.limit,
       mechanics: {
-        bestAsk: p.contract.prices?.bestAsk ?? null,
-        bestBid: p.contract.prices?.bestBid ?? null,
+        bestAsk: p.depth?.asks[0]?.price ?? null,
+        bestBid: p.depth?.bid ?? null,
         lastTradePrice: p.contract.prices?.lastTradePrice ?? null,
         askFetchedAt: p.fetchedAt,
-        /** The spread this price carries: the usual one, or the wider one of a thin book. */
-        spreadBps: p.spreadBps,
+        /**
+         * The spread this price carries: the usual one, the wider one of a thin book, or a mix of the two
+         * when Gemini's offers cover only part of the payout.
+         */
+        spreadBps: p.reading.spreadBps,
         /** True when the book is not a market: a side is missing, or its sides are more than half a dollar apart. */
-        thin: p.thin,
+        thin: p.reading.thin,
+        /** The depth rule: how much of this payout Gemini's offers cover, and the cheapest offers as `[price, contracts]`. */
+        covered: p.reading.covered.toString(),
+        offers: (p.depth?.asks ?? []).slice(0, 5).map((o) => [o.price, o.amount]),
         loading: p.price.loading.toString(),
         utilizationBps: p.price.utilizationBps,
         maxLockedBps: params.maxLockedBps,
