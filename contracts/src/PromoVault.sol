@@ -112,6 +112,15 @@ contract PromoVault is EIP712 {
         uint256 indexed promoId, address indexed merchant, bytes32 indexed instrumentSymbol, Quote quote
     );
     event ClaimRegistered(uint256 indexed promoId, address indexed customer, uint32 claimCount);
+    /// @dev The plain Gemini event id and resolution side, so anyone can check the result against
+    ///      Gemini's settled-events list.
+    event Settled(
+        uint256 indexed promoId,
+        bool outcomeYes,
+        string geminiEventId,
+        string resolutionSide,
+        uint64 settledAt
+    );
     event PricerSet(address indexed pricer);
     event OracleSet(address indexed oracle);
     event MaxExposureBpsSet(uint16 bps);
@@ -121,6 +130,7 @@ contract PromoVault is EIP712 {
     event Unpaused(address indexed by);
 
     error NotOwner();
+    error NotOracle();
     error ZeroAddress();
     error ExposureCapTooHigh(uint16 bps);
     error VaultPaused();
@@ -143,11 +153,18 @@ contract PromoVault is EIP712 {
     error ClaimsClosed(uint64 claimDeadline);
     error PromoFull(uint32 maxClaims);
     error AlreadyClaimed(address customer);
+    error ClaimsStillOpen(uint64 claimDeadline);
+    error EventIdMismatch();
 
     // ---------------------------------------------------------------- setup
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    modifier onlyOracle() {
+        if (msg.sender != oracle) revert NotOracle();
         _;
     }
 
@@ -332,6 +349,33 @@ contract PromoVault is EIP712 {
         claimants[promoId].push(customer);
 
         emit ClaimRegistered(promoId, customer, count);
+    }
+
+    // ---------------------------------------------------------------- settlement
+
+    /// @notice Post the market result for a promo. Starts the dispute window.
+    /// @dev Allowed from claimDeadline on, which is exactly when claims stop. The plain event id
+    ///      must hash to the id the promo was created with; it and the resolution side are only
+    ///      emitted, not stored.
+    /// @param outcomeYes True if the promo's contract resolved "yes", so customers are owed.
+    /// @param geminiEventIdPlain The Gemini event id as a string, for example "362998".
+    /// @param resolutionSide The resolutionSide field Gemini published for the contract.
+    function settle(
+        uint256 promoId,
+        bool outcomeYes,
+        string calldata geminiEventIdPlain,
+        string calldata resolutionSide
+    ) external onlyOracle {
+        Promo storage p = _promo(promoId);
+        if (p.status != Status.Open) revert WrongStatus(p.status);
+        if (block.timestamp < p.claimDeadline) revert ClaimsStillOpen(p.claimDeadline);
+        if (keccak256(bytes(geminiEventIdPlain)) != p.geminiEventId) revert EventIdMismatch();
+
+        p.outcomeYes = outcomeYes;
+        p.settledAt = uint64(block.timestamp);
+        p.status = Status.Settled;
+
+        emit Settled(promoId, outcomeYes, geminiEventIdPlain, resolutionSide, uint64(block.timestamp));
     }
 
     // ---------------------------------------------------------------- admin

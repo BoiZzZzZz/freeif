@@ -48,6 +48,14 @@ abstract contract VaultTest is Test {
     );
     event ClaimRegistered(uint256 indexed promoId, address indexed customer, uint32 claimCount);
 
+    event Settled(
+        uint256 indexed promoId,
+        bool outcomeYes,
+        string geminiEventId,
+        string resolutionSide,
+        uint64 settledAt
+    );
+
     function setUp() public virtual {
         (pricer, pricerPk) = makeAddrAndKey("pricer");
         usdc = new MockUSDC();
@@ -146,6 +154,36 @@ abstract contract VaultTest is Test {
         returns (uint256 promoId)
     {
         return _create(_quote(payoutPerClaim, maxClaims, premium));
+    }
+
+    // ------------------------------------------------------------ lifecycle
+
+    function _claim(uint256 promoId, address customer) internal {
+        vm.prank(vault.getPromo(promoId).claimSigner);
+        vault.registerClaim(promoId, customer);
+    }
+
+    /// @dev Register `count` new customers, named by promo and position.
+    function _claimMany(uint256 promoId, uint256 count) internal returns (address[] memory customers) {
+        customers = new address[](count);
+        uint256 start = vault.getPromo(promoId).claimCount;
+        for (uint256 i = 0; i < count; i++) {
+            customers[i] =
+                makeAddr(string.concat("customer-", vm.toString(promoId), "-", vm.toString(start + i)));
+            _claim(promoId, customers[i]);
+        }
+    }
+
+    function _warpToClaimDeadline(uint256 promoId) internal {
+        uint64 deadline = vault.getPromo(promoId).claimDeadline;
+        if (block.timestamp < deadline) vm.warp(deadline);
+    }
+
+    /// @dev Warp to the claim deadline if needed and post the result as the oracle.
+    function _settle(uint256 promoId, bool outcomeYes) internal {
+        _warpToClaimDeadline(promoId);
+        vm.prank(oracle);
+        vault.settle(promoId, outcomeYes, EVENT_ID_PLAIN, outcomeYes ? "yes" : "no");
     }
 
     /// @dev A 50-customer promo: the merchant pays `premium` and `maxPayout` is locked.
