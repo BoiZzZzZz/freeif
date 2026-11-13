@@ -117,7 +117,7 @@ The filter is tested as it runs: `test/stream.test.ts` loads `stream/filter.js`,
 
 A Stream is billed for every block it reads, whether the filter keeps anything or not, and a paused Stream resumes at the block it stopped at. So `pnpm stream off` pauses it when nothing is being shown, and `pnpm stream on` removes it and starts a new one at the newest block; the keeper's own read covers the gap.
 
-Status on Nov 13: the webhook, the feed, the keeper's own read and the pages are live, and every event so far came by `rpc`. The Stream itself has not been started yet.
+Status on Nov 13: the Stream is made and has run. `pnpm stream on` made `freeif-vault` with an API key from a free plan (the Streams permission is enough), QuickNode took one block per delivery, and the Stream stayed at the newest block. On promos 17 to 20 (the test loop, four times) all 27 events came `via: "stream"` in 25 deliveries, every delivery passed the signature check, and the keeper had each event 0.4 to 1.7 seconds after its block (4 to 7 by its own read, before the Stream). Promo 20 ended "yes": `Finalized` came by the Stream and woke the loop, and the payout was in the third block after it. `GET /health` counts the deliveries (`stream.deliveries`, `stream.signed`, `stream.byStream`).
 
 ## Pricing rules
 

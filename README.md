@@ -95,7 +95,19 @@ What happens when the Stream is late or off: the keeper also reads the vault's l
 
 The filter is tested as it runs, against real blocks of the deployed vault, and its topic hashes are checked against the ABI (`keeper/test/stream.test.ts`). More in [`keeper/README.md`](keeper/README.md), "The feed".
 
-Status on Nov 13: the webhook, the feed and the live pages are deployed, and every event so far reached the pages by the keeper's own read of the chain. The Stream itself is started with `pnpm stream on` in `keeper/` and has not been started yet.
+What was measured on Nov 13, on the first four promos run with the Stream on ([17](https://freeif.app/promo/17?mechanics=1), [18](https://freeif.app/promo/18?mechanics=1), [19](https://freeif.app/promo/19?mechanics=1) and [20](https://freeif.app/promo/20?mechanics=1), each on a 5-minute BTC market):
+
+| | |
+|---|---|
+| Events that came by the Stream | 27 of 27, in 25 deliveries, every delivery with a valid QuickNode signature. The keeper's own read had nothing to add |
+| From a block to the keeper having its event | 0.4 to 1.7 seconds, 1.05 on average. By the keeper's own read, before the Stream, it was 4 to 7 |
+| From a block to the line on the promo page | One to two seconds (promo 20, watched in a browser) |
+| A payout started by a delivery (promo 20) | The Stream delivered `Finalized` 1.4 seconds after its block; the three customers were paid three blocks after it, and the Stream delivered the three `Paid` events 1.0 second after theirs |
+| The Stream's place on the chain | The newest block, with one block per delivery, while Arc made a block every 0.7 seconds |
+
+Open one of those promos: the top of the page says "Live · QuickNode Stream", and each line under "What's happening" says how it came and how long after its block.
+
+The Stream is made, tested, paused and removed by one script, `keeper/scripts/stream.ts` (`pnpm stream on`, `test`, `off`, `status`, `remove`), so its settings are in the repo. A Stream is billed for every block it reads, so it is paused when nobody is watching; the pages then run on the keeper's own read and say "RPC".
 
 ## Run the contract tests
 

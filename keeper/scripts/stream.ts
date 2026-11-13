@@ -23,7 +23,10 @@ const API = "https://api.quicknode.com/streams/rest/v1";
 const NAME = "freeif-vault";
 const NETWORK = "arc-testnet";
 const DATASET = "logs";
-/** Blocks in one delivery. QuickNode wants at least 5 on a chain with blocks under a second; 1 is tried first. */
+/**
+ * Blocks in one delivery. 1 is tried first. QuickNode's docs ask for at least 5 on a chain with blocks under
+ * a second; on Nov 13 it took 1 for Arc testnet and the Stream stayed at the newest block.
+ */
 const BATCH_SIZES = [1, 5];
 
 const apiKey = config.env("QUICKNODE_API_KEY");

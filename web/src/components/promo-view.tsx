@@ -326,8 +326,10 @@ function Proof({ promo, open }: { promo: Promo; open: boolean }) {
         )}
         <ProofRow label="The feed">
           {byStream > 0
-            ? `Delivered by QuickNode Streams: ${byStream} of this promo's ${promo.events.length} events came from a Stream on Arc Testnet that watches the vault's logs and posts them to the keeper. The keeper read the rest from the chain.`
-            : "RPC fallback: the keeper read this promo's events from the chain. A QuickNode Stream on Arc Testnet posts the vault's events to the keeper as they happen; none of this promo's came that way."}
+            ? byStream === promo.events.length
+              ? `Delivered by QuickNode Streams: all ${byStream} of this promo's events came from a Stream on Arc Testnet that watches the vault's logs and posts them to the keeper.`
+              : `Delivered by QuickNode Streams: ${byStream} of this promo's ${promo.events.length} events came from a Stream on Arc Testnet that watches the vault's logs and posts them to the keeper. The keeper read the rest from the chain.`
+            :"RPC fallback: the keeper read this promo's events from the chain. A QuickNode Stream on Arc Testnet posts the vault's events to the keeper as they happen; none of this promo's came that way."}
           {lastDelivery !== null && ` Last Stream delivery ${dayTime(lastDelivery)}.`}{" "}
           <a className="underline underline-offset-2" href={`${KEEPER_URL}/feed`} target="_blank" rel="noreferrer">
             The feed as the keeper has it
