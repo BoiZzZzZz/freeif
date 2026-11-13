@@ -42,7 +42,7 @@ contract PromoVault is EIP712 {
         uint64 settledAt;
         Status status;
         bool outcomeYes;
-        uint32 paidCount;
+        uint32 paidCount; // claimants payoutBatch has dealt with: paid, or moved to owedPayout
         bool hedgeMode; // true: one claim, paid to the merchant
     }
 
@@ -87,8 +87,15 @@ contract PromoVault is EIP712 {
     uint256 public totalShares;
     mapping(address => uint256) public shares;
 
-    /// @notice Sum of the unpaid maximum payouts of every open promo. LPs cannot withdraw it.
+    /// @notice USDC that LPs cannot withdraw: the sum of every promo's collateralLocked, plus
+    ///         totalOwedPayouts.
     uint256 public lockedCollateral;
+
+    /// @notice Payouts whose transfer failed in payoutBatch, by promo and customer. Each stays
+    ///         inside lockedCollateral until retryPayout sends it.
+    mapping(uint256 => mapping(address => uint256)) public owedPayout;
+    /// @notice Sum of owedPayout.
+    uint256 public totalOwedPayouts;
 
     uint16 public maxExposureBps = 2000; // one promo may put at risk at most 20% of the free balance
     uint32 public disputeWindow = 3600; // seconds between settle and finalize
@@ -126,6 +133,8 @@ contract PromoVault is EIP712 {
     event Finalized(uint256 indexed promoId, bool outcomeYes, uint256 collateralReleased);
     event Voided(uint256 indexed promoId, address indexed merchant, uint256 premiumRefunded);
     event Paid(uint256 indexed promoId, address indexed customer, uint256 amount);
+    /// @dev The transfer to this customer failed. The amount is in owedPayout until retryPayout.
+    event PayoutFailed(uint256 indexed promoId, address indexed customer, uint256 amount);
     event PricerSet(address indexed pricer);
     event OracleSet(address indexed oracle);
     event MaxExposureBpsSet(uint16 bps);
@@ -164,6 +173,7 @@ contract PromoVault is EIP712 {
     error DisputeWindowOver(uint256 windowEnd);
     error DisputeWindowOpen(uint256 windowEnd);
     error VoidGraceNotOver(uint256 voidableAfter);
+    error NothingOwed(uint256 promoId, address customer);
 
     // ---------------------------------------------------------------- setup
 
@@ -465,9 +475,18 @@ contract PromoVault is EIP712 {
 
     /// @notice Pay the next `count` registered customers of a promo that finalized "yes". Anyone
     ///         may call; the keeper calls it in batches of 50.
-    /// @dev Customers are paid in registration order, payoutPerClaim each, out of the promo's lock.
-    ///      A count above what is left pays what is left. The promo is PaidOut after the last one.
-    /// @return paid How many customers this call paid.
+    /// @dev Customers are taken in registration order, payoutPerClaim each, out of the promo's lock.
+    ///      A count above what is left takes what is left. The promo is PaidOut after the last one.
+    ///
+    ///      A transfer that fails (USDC refuses a blocklisted address) does not revert the batch,
+    ///      so one customer cannot hold up the ones behind them. That payout leaves the promo's
+    ///      lock for owedPayout, stays inside lockedCollateral, and waits for retryPayout.
+    ///
+    ///      The promo's own books move before the transfers, so no customer can be taken twice.
+    ///      The vault-wide lock is the one thing written after them: it drops only by what was
+    ///      actually sent, and until then it overstates what is locked, never understates it.
+    /// @return paid How many customers this call paid. Customers whose transfer failed are not
+    ///         counted here, but paidCount moves past them.
     function payoutBatch(uint256 promoId, uint32 count) external returns (uint32 paid) {
         Promo storage p = _promo(promoId);
         if (p.status != Status.FinalizedYes) revert WrongStatus(p.status);
@@ -475,21 +494,43 @@ contract PromoVault is EIP712 {
 
         uint32 start = p.paidCount;
         uint32 remaining = p.claimCount - start;
-        paid = count < remaining ? count : remaining;
-        uint32 end = start + paid;
+        uint32 taken = count < remaining ? count : remaining;
+        uint32 end = start + taken;
         uint256 amount = p.payoutPerClaim;
 
         p.paidCount = end;
-        p.collateralLocked -= amount * paid;
-        lockedCollateral -= amount * paid;
+        p.collateralLocked -= amount * taken;
         if (end == p.claimCount) p.status = Status.PaidOut;
 
         address[] storage list = claimants[promoId];
         for (uint32 i = start; i < end; i++) {
             address customer = list[i];
-            emit Paid(promoId, customer, amount);
-            usdc.safeTransfer(customer, amount);
+            if (usdc.trySafeTransfer(customer, amount)) {
+                paid++;
+                emit Paid(promoId, customer, amount);
+            } else {
+                owedPayout[promoId][customer] = amount;
+                emit PayoutFailed(promoId, customer, amount);
+            }
         }
+
+        lockedCollateral -= amount * paid;
+        if (paid != taken) totalOwedPayouts += amount * (taken - paid);
+    }
+
+    /// @notice Send a payout whose transfer failed in payoutBatch. Anyone may call, at any time;
+    ///         the money goes to the customer it is owed to.
+    /// @dev Reverts if the transfer fails again, and the payout stays owed.
+    function retryPayout(uint256 promoId, address customer) external {
+        uint256 amount = owedPayout[promoId][customer];
+        if (amount == 0) revert NothingOwed(promoId, customer);
+
+        owedPayout[promoId][customer] = 0;
+        totalOwedPayouts -= amount;
+        lockedCollateral -= amount;
+
+        emit Paid(promoId, customer, amount);
+        usdc.safeTransfer(customer, amount);
     }
 
     /// @dev The first moment a settled promo can be finalized, and the first moment a veto is

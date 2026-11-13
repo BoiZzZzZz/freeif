@@ -3,6 +3,7 @@ pragma solidity 0.8.28;
 
 import {PromoVault} from "../src/PromoVault.sol";
 import {SettlementBase} from "./Settlement.t.sol";
+import {MockUSDC} from "./mocks/MockUSDC.sol";
 
 /// @dev The base promo has 3 customers out of 10, at $20 each.
 contract PayoutBatchTest is SettlementBase {
@@ -233,5 +234,304 @@ contract PayoutBatchTest is SettlementBase {
         }
         assertEq(vault.lockedCollateral(), 0);
         _assertStatus(promoId, PromoVault.Status.PaidOut);
+    }
+}
+
+/// @dev A transfer that fails inside payoutBatch: the mock USDC reverts, as USDC does, on a
+///      transfer to a blocked address. The base promo has 3 customers out of 10, at $20 each.
+contract PayoutFailureTest is SettlementBase {
+    function _block(address customer) internal {
+        usdc.setBlocked(customer, true);
+    }
+
+    function _unblock(address customer) internal {
+        usdc.setBlocked(customer, false);
+    }
+
+    /// The reason for the change: the customers behind a blocked one are paid in the same batch.
+    function test_payoutBatch_skipsABlockedCustomerAndPaysTheRest() public {
+        _settleAndFinalize(promoId, true);
+        _block(customers[0]);
+
+        vm.expectEmit(address(vault));
+        emit PayoutFailed(promoId, customers[0], PAYOUT);
+        vm.expectEmit(address(vault));
+        emit Paid(promoId, customers[1], PAYOUT);
+        vm.expectEmit(address(vault));
+        emit Paid(promoId, customers[2], PAYOUT);
+        uint32 paid = vault.payoutBatch(promoId, 50);
+
+        assertEq(paid, 2, "the return value counts the customers who were paid");
+        assertEq(usdc.balanceOf(customers[0]), 0);
+        assertEq(usdc.balanceOf(customers[1]), PAYOUT);
+        assertEq(usdc.balanceOf(customers[2]), PAYOUT);
+    }
+
+    /// The promo is done; the one payout it could not send sits in a bucket of its own.
+    function test_payoutBatch_movesAFailedPayoutFromThePromoLockToOwed() public {
+        _settleAndFinalize(promoId, true);
+        _block(customers[1]);
+
+        vault.payoutBatch(promoId, 50);
+
+        PromoVault.Promo memory p = vault.getPromo(promoId);
+        assertEq(p.paidCount, 3, "paidCount moves past the customer who was skipped");
+        assertEq(p.collateralLocked, 0);
+        _assertStatus(promoId, PromoVault.Status.PaidOut);
+        assertEq(vault.owedPayout(promoId, customers[1]), PAYOUT);
+        assertEq(vault.owedPayout(promoId, customers[0]), 0);
+        assertEq(vault.totalOwedPayouts(), PAYOUT);
+        assertEq(vault.lockedCollateral(), PAYOUT, "the owed payout is still locked");
+    }
+
+    function test_payoutBatch_aFailedPayoutDoesNotBecomeFreeBalance() public {
+        _settleAndFinalize(promoId, true);
+        uint256 freeBefore = vault.freeBalance();
+        _block(customers[2]);
+
+        vault.payoutBatch(promoId, 50);
+
+        assertEq(vault.freeBalance(), freeBefore);
+        assertEq(usdc.balanceOf(address(vault)), LIQUIDITY + PREMIUM - 2 * PAYOUT);
+    }
+
+    /// F11 for owed payouts: every LP leaves, and the skipped customer's money is still there.
+    function test_payoutBatch_anOwedPayoutCannotBeWithdrawnByLps() public {
+        _settleAndFinalize(promoId, true);
+        _block(customers[0]);
+        vault.payoutBatch(promoId, 50);
+
+        uint256 aliceShares = vault.shares(alice);
+        vm.prank(alice);
+        vault.withdraw(aliceShares);
+
+        assertGe(usdc.balanceOf(address(vault)), PAYOUT);
+        _unblock(customers[0]);
+        vault.retryPayout(promoId, customers[0]);
+        assertEq(usdc.balanceOf(customers[0]), PAYOUT);
+    }
+
+    function test_payoutBatch_aBlockedCustomerInAnEarlierBatchDoesNotStopLaterBatches() public {
+        _settleAndFinalize(promoId, true);
+        _block(customers[0]);
+
+        assertEq(vault.payoutBatch(promoId, 1), 0);
+        assertEq(vault.getPromo(promoId).paidCount, 1);
+        assertEq(vault.lockedCollateral(), 3 * PAYOUT, "nothing has left the vault yet");
+        _assertStatus(promoId, PromoVault.Status.FinalizedYes);
+
+        assertEq(vault.payoutBatch(promoId, 50), 2);
+        assertEq(usdc.balanceOf(customers[1]), PAYOUT);
+        assertEq(usdc.balanceOf(customers[2]), PAYOUT);
+        assertEq(vault.lockedCollateral(), PAYOUT);
+        _assertStatus(promoId, PromoVault.Status.PaidOut);
+    }
+
+    function test_payoutBatch_whenEveryTransferFails_stillFinishesThePromo() public {
+        _settleAndFinalize(promoId, true);
+        for (uint256 i = 0; i < 3; i++) {
+            _block(customers[i]);
+        }
+        uint256 balanceBefore = usdc.balanceOf(address(vault));
+
+        assertEq(vault.payoutBatch(promoId, 50), 0);
+
+        assertEq(usdc.balanceOf(address(vault)), balanceBefore);
+        assertEq(vault.totalOwedPayouts(), 3 * PAYOUT);
+        assertEq(vault.lockedCollateral(), 3 * PAYOUT);
+        assertEq(vault.getPromo(promoId).collateralLocked, 0);
+        _assertStatus(promoId, PromoVault.Status.PaidOut);
+    }
+
+    /// Hedge mode pays the merchant, so a blocked merchant is owed the same way.
+    function test_payoutBatch_hedgeMode_aBlockedMerchantIsOwed() public {
+        PromoVault.Quote memory q = _quote(500 * USDC, 1, 205 * USDC);
+        q.hedgeMode = true;
+        uint256 hedge = _create(q);
+        _settleAndFinalize(hedge, true);
+        _block(merchant);
+
+        vm.expectEmit(address(vault));
+        emit PayoutFailed(hedge, merchant, 500 * USDC);
+        vault.payoutBatch(hedge, 50);
+
+        assertEq(vault.owedPayout(hedge, merchant), 500 * USDC);
+        _assertStatus(hedge, PromoVault.Status.PaidOut);
+
+        _unblock(merchant);
+        vault.retryPayout(hedge, merchant);
+        assertEq(usdc.balanceOf(merchant), 500 * USDC);
+    }
+
+    /// Owed payouts are kept per promo: the same customer can be owed by one and paid by another.
+    function test_payoutBatch_owedPayoutsAreKeptPerPromo() public {
+        uint256 other = _createPromo(50 * USDC, 4, 90 * USDC);
+        _claim(other, customers[0]);
+        _settleAndFinalize(promoId, true);
+        _settleAndFinalize(other, true);
+
+        _block(customers[0]);
+        vault.payoutBatch(promoId, 50);
+        _unblock(customers[0]);
+        vault.payoutBatch(other, 50);
+
+        assertEq(vault.owedPayout(promoId, customers[0]), PAYOUT);
+        assertEq(vault.owedPayout(other, customers[0]), 0);
+        assertEq(usdc.balanceOf(customers[0]), 50 * USDC);
+        assertEq(vault.lockedCollateral(), PAYOUT);
+    }
+
+    // ------------------------------------------------------------ retryPayout
+
+    function _payWithFirstCustomerBlocked() internal {
+        _settleAndFinalize(promoId, true);
+        _block(customers[0]);
+        vault.payoutBatch(promoId, 50);
+    }
+
+    function test_retryPayout_paysOnceTheCustomerCanReceive() public {
+        _payWithFirstCustomerBlocked();
+        _unblock(customers[0]);
+
+        vm.expectEmit(address(vault));
+        emit Paid(promoId, customers[0], PAYOUT);
+        vault.retryPayout(promoId, customers[0]);
+
+        assertEq(usdc.balanceOf(customers[0]), PAYOUT);
+        assertEq(vault.owedPayout(promoId, customers[0]), 0);
+        assertEq(vault.totalOwedPayouts(), 0);
+        assertEq(vault.lockedCollateral(), 0);
+        assertEq(usdc.balanceOf(address(vault)), LIQUIDITY + PREMIUM - 3 * PAYOUT);
+    }
+
+    function test_retryPayout_paysOutOfTheLock() public {
+        _payWithFirstCustomerBlocked();
+        uint256 freeBefore = vault.freeBalance();
+        _unblock(customers[0]);
+
+        vault.retryPayout(promoId, customers[0]);
+
+        assertEq(vault.freeBalance(), freeBefore, "the free balance does not move");
+    }
+
+    /// Still blocked: the retry reverts and the payout stays owed and locked.
+    function test_retryPayout_revertsWhileTheTransferStillFails() public {
+        _payWithFirstCustomerBlocked();
+
+        vm.expectRevert(abi.encodeWithSelector(MockUSDC.Blocked.selector, customers[0]));
+        vault.retryPayout(promoId, customers[0]);
+
+        assertEq(vault.owedPayout(promoId, customers[0]), PAYOUT);
+        assertEq(vault.totalOwedPayouts(), PAYOUT);
+        assertEq(vault.lockedCollateral(), PAYOUT);
+    }
+
+    function test_retryPayout_canBeCalledByAnyoneAndPaysTheCustomer() public {
+        _payWithFirstCustomerBlocked();
+        _unblock(customers[0]);
+        address stranger = makeAddr("a stranger");
+
+        vm.prank(stranger);
+        vault.retryPayout(promoId, customers[0]);
+
+        assertEq(usdc.balanceOf(customers[0]), PAYOUT);
+        assertEq(usdc.balanceOf(stranger), 0);
+    }
+
+    function test_retryPayout_worksWhilePaused() public {
+        _payWithFirstCustomerBlocked();
+        _unblock(customers[0]);
+        vault.pause();
+
+        vault.retryPayout(promoId, customers[0]);
+
+        assertEq(usdc.balanceOf(customers[0]), PAYOUT);
+    }
+
+    function test_retryPayout_revertsTheSecondTime() public {
+        _payWithFirstCustomerBlocked();
+        _unblock(customers[0]);
+        vault.retryPayout(promoId, customers[0]);
+
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.NothingOwed.selector, promoId, customers[0]));
+        vault.retryPayout(promoId, customers[0]);
+        assertEq(usdc.balanceOf(customers[0]), PAYOUT, "nobody is paid twice");
+    }
+
+    function test_retryPayout_revertsForACustomerWhoWasPaid() public {
+        _payWithFirstCustomerBlocked();
+
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.NothingOwed.selector, promoId, customers[1]));
+        vault.retryPayout(promoId, customers[1]);
+    }
+
+    /// A registered customer is owed nothing until payoutBatch has tried and failed.
+    function test_retryPayout_revertsBeforeThePayoutWasTried() public {
+        _settleAndFinalize(promoId, true);
+
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.NothingOwed.selector, promoId, customers[0]));
+        vault.retryPayout(promoId, customers[0]);
+    }
+
+    function test_retryPayout_revertsForAnotherPromoOrAnUnknownOne() public {
+        uint256 other = _createPromo(50 * USDC, 4, 90 * USDC);
+        _payWithFirstCustomerBlocked();
+        _unblock(customers[0]);
+
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.NothingOwed.selector, other, customers[0]));
+        vault.retryPayout(other, customers[0]);
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.NothingOwed.selector, 9, customers[0]));
+        vault.retryPayout(9, customers[0]);
+    }
+
+    /// Any set of blocked customers, any batch size: everyone else is paid at once, every blocked
+    /// customer is owed exactly one payout, and after the retries nothing is left locked.
+    function testFuzz_payoutBatch_everyCustomerIsPaidOrOwedExactlyOnce(
+        uint8 claims,
+        uint16 blockedMask,
+        uint8 batch
+    ) public {
+        _claimMany(promoId, bound(claims, 0, 7));
+        address[] memory all = vault.getClaimants(promoId);
+        _settleAndFinalize(promoId, true);
+        uint256 balanceBefore = usdc.balanceOf(address(vault));
+        uint256 freeBefore = vault.freeBalance();
+
+        uint256 blockedCount;
+        for (uint256 i = 0; i < all.length; i++) {
+            if (blockedMask >> i & 1 == 1) {
+                _block(all[i]);
+                blockedCount++;
+            }
+        }
+
+        uint256 paid;
+        uint32 size = uint32(bound(batch, 1, 20));
+        while (_status(promoId) == PromoVault.Status.FinalizedYes) {
+            paid += vault.payoutBatch(promoId, size);
+        }
+
+        assertEq(paid, all.length - blockedCount);
+        assertEq(balanceBefore - usdc.balanceOf(address(vault)), paid * PAYOUT);
+        assertEq(vault.totalOwedPayouts(), blockedCount * PAYOUT);
+        assertEq(vault.lockedCollateral(), blockedCount * PAYOUT);
+        assertEq(vault.freeBalance(), freeBefore);
+        assertEq(vault.getPromo(promoId).collateralLocked, 0);
+
+        for (uint256 i = 0; i < all.length; i++) {
+            if (blockedMask >> i & 1 == 0) {
+                assertEq(usdc.balanceOf(all[i]), PAYOUT);
+                continue;
+            }
+            assertEq(usdc.balanceOf(all[i]), 0);
+            assertEq(vault.owedPayout(promoId, all[i]), PAYOUT);
+            _unblock(all[i]);
+            vault.retryPayout(promoId, all[i]);
+            assertEq(usdc.balanceOf(all[i]), PAYOUT);
+        }
+        assertEq(vault.totalOwedPayouts(), 0);
+        assertEq(vault.lockedCollateral(), 0);
+        assertEq(balanceBefore - usdc.balanceOf(address(vault)), all.length * PAYOUT);
+        assertEq(vault.freeBalance(), freeBefore);
     }
 }

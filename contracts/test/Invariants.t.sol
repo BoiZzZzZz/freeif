@@ -23,7 +23,8 @@ contract VaultHandler is Test {
         Reset,
         Finalize,
         Void,
-        Pay
+        Pay,
+        Retry
     }
 
     error BadTransition(uint256 promoId, PromoVault.Status from, PromoVault.Status to);
@@ -51,6 +52,9 @@ contract VaultHandler is Test {
 
     /// @dev How many times each call went through, for the coverage check at the end of a run.
     mapping(Step => uint256) public done;
+
+    /// @dev Payouts that payoutBatch could not send because the customer was blocked.
+    uint256 public payoutsFailed;
 
     /// @dev How many forbidden calls were tried (and reverted, or the run would have failed).
     uint256 public forbiddenTried;
@@ -83,6 +87,14 @@ contract VaultHandler is Test {
 
     function lpAt(uint256 i) external view returns (address) {
         return lps[i];
+    }
+
+    function customerCount() external view returns (uint256) {
+        return customers.length;
+    }
+
+    function customerAt(uint256 i) external view returns (address) {
+        return customers[i];
     }
 
     // ------------------------------------------------------------ liquidity
@@ -225,6 +237,31 @@ contract VaultHandler is Test {
         if (found) _pay(promoId, count);
     }
 
+    /// @dev Put a customer on the mock USDC blocklist, or take them off it. Only customers:
+    ///      a blocked merchant could not pay a premium or take a refund, which is a USDC rule
+    ///      and not a vault rule.
+    function setBlocked(uint256 customerSeed, bool isBlocked) external {
+        usdc.setBlocked(customers[customerSeed % customers.length], isBlocked);
+    }
+
+    /// @dev Send one payout that failed earlier. The customer comes off the blocklist first if
+    ///      they are still on it; a retry while still blocked is one of the forbidden calls.
+    function retryPayout(uint256 promoSeed, uint256 customerSeed) external {
+        (bool found, uint256 promoId, address customer) = _findOwed(promoSeed, customerSeed);
+        if (!found) return;
+        usdc.setBlocked(customer, false);
+        uint256 owed = vault.owedPayout(promoId, customer);
+        uint256 before = usdc.balanceOf(customer);
+
+        vault.retryPayout(promoId, customer);
+
+        assertEq(usdc.balanceOf(customer) - before, owed, "a retry did not pay what was owed");
+        paidByPromo[promoId] += owed;
+        ghostPaid += owed;
+        done[Step.Retry]++;
+        _afterAction();
+    }
+
     /// @dev Take one promo one step along its life, waiting for the clock when that is all it
     ///      needs: claim, settle, finalize, pay. With the single-step actions alone, most
     ///      sequences never get a promo as far as a payout. advanceAgain is the same action
@@ -266,12 +303,13 @@ contract VaultHandler is Test {
     ///      4  payoutBatch on a promo that is not finalized "yes"
     ///      5  voidPromo before the grace period ends, or on a promo with a result
     ///      6  a second promo from a quote nonce that has been used
+    ///      7  retryPayout for a customer who is owed nothing, or who is still blocked
     function forbidden(uint256 promoSeed, uint256 kind, address caller) external {
         uint256 n = vault.promoCount();
         if (n == 0) return;
         uint256 promoId = promoSeed % n;
         PromoVault.Promo memory p = vault.getPromo(promoId);
-        kind = kind % 7;
+        kind = kind % 8;
         bytes memory data;
 
         if (kind == 0) {
@@ -296,6 +334,10 @@ contract VaultHandler is Test {
             if (_allowed(p, Step.Void)) return;
             data = abi.encodeCall(vault.voidPromo, (promoId));
             vm.prank(owner);
+        } else if (kind == 7) {
+            address customer = customers[uint160(caller) % customers.length];
+            if (vault.owedPayout(promoId, customer) != 0 && !usdc.blocked(customer)) return;
+            data = abi.encodeCall(vault.retryPayout, (promoId, customer));
         } else {
             // The last quote again, re-dated and re-signed by the pricer, with its spent nonce.
             PromoVault.Quote memory q = lastQuote;
@@ -373,13 +415,20 @@ contract VaultHandler is Test {
 
     function _pay(uint256 promoId, uint32 count) internal {
         uint256 before = usdc.balanceOf(address(vault));
+        uint256 owedBefore = vault.totalOwedPayouts();
+        PromoVault.Promo memory p = vault.getPromo(promoId);
+        uint256 payoutPerClaim = p.payoutPerClaim;
+        // One call in three blocks the next customer in line first, so most runs see a payout fail.
+        if (count % 3 == 0 && !p.hedgeMode) usdc.setBlocked(vault.claimants(promoId, p.paidCount), true);
 
         uint32 customersPaid = vault.payoutBatch(promoId, uint32(bound(count, 1, 4)));
 
         uint256 paid = before - usdc.balanceOf(address(vault));
+        assertEq(paid, payoutPerClaim * customersPaid, "payoutBatch returned the wrong count");
         paidByPromo[promoId] += paid;
         ghostPaid += paid;
         done[Step.Pay] += customersPaid;
+        payoutsFailed += (vault.totalOwedPayouts() - owedBefore) / payoutPerClaim;
         _afterAction();
     }
 
@@ -393,6 +442,25 @@ contract VaultHandler is Test {
             if (_allowed(vault.getPromo(promoId), step)) return (true, promoId);
         }
         return (false, 0);
+    }
+
+    /// @dev The first payout still owed, starting from a random promo and a random customer.
+    function _findOwed(uint256 promoSeed, uint256 customerSeed)
+        internal
+        view
+        returns (bool, uint256, address)
+    {
+        if (vault.totalOwedPayouts() == 0) return (false, 0, address(0));
+        uint256 n = vault.promoCount();
+        uint256 m = customers.length;
+        for (uint256 i = 0; i < n; i++) {
+            uint256 promoId = (promoSeed % n + i) % n;
+            for (uint256 j = 0; j < m; j++) {
+                address customer = customers[(customerSeed % m + j) % m];
+                if (vault.owedPayout(promoId, customer) != 0) return (true, promoId, customer);
+            }
+        }
+        return (false, 0, address(0));
     }
 
     function _findStatus(uint256 seed, PromoVault.Status status) internal view returns (bool, uint256) {
@@ -474,7 +542,7 @@ contract PromoVaultInvariantTest is Test {
         handler.deposit(0, 5_000e6);
         handler.deposit(1, 2_500e6);
 
-        bytes4[] memory selectors = new bytes4[](16);
+        bytes4[] memory selectors = new bytes4[](18);
         selectors[0] = VaultHandler.deposit.selector;
         selectors[1] = VaultHandler.withdraw.selector;
         selectors[2] = VaultHandler.createPromo.selector;
@@ -491,27 +559,33 @@ contract PromoVaultInvariantTest is Test {
         selectors[13] = VaultHandler.setMaxExposureBps.selector;
         selectors[14] = VaultHandler.setPaused.selector;
         selectors[15] = VaultHandler.forbidden.selector;
+        selectors[16] = VaultHandler.setBlocked.selector;
+        selectors[17] = VaultHandler.retryPayout.selector;
         targetContract(address(handler));
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
     }
 
     /// F11: the vault always holds its locked collateral, and lockedCollateral is exactly the sum
-    /// of the unpaid maximum payouts of every promo that is not finalized-no, paid out or voided.
+    /// of the unpaid maximum payouts of every promo that is not finalized-no, paid out or voided,
+    /// plus the payouts that failed and are still owed.
     function invariant_balanceCoversLockedCollateral() public view {
         uint256 locked = vault.lockedCollateral();
         assertGe(usdc.balanceOf(address(vault)), locked, "balance below locked collateral");
 
         uint256 sumOfLocks;
         uint256 sumOfUnpaid;
+        uint256 sumOfOwed;
         uint256 n = vault.promoCount();
         for (uint256 promoId = 0; promoId < n; promoId++) {
             PromoVault.Promo memory p = vault.getPromo(promoId);
             sumOfLocks += p.collateralLocked;
             assertEq(p.collateralLocked, _unpaidMaxPayout(p), "a promo's lock is not its unpaid max payout");
             sumOfUnpaid += _unpaidMaxPayout(p);
+            sumOfOwed += _owed(promoId, p);
         }
-        assertEq(locked, sumOfLocks, "lockedCollateral is not the sum of the promo locks");
-        assertEq(locked, sumOfUnpaid, "lockedCollateral is not the sum of unpaid max payouts");
+        assertEq(vault.totalOwedPayouts(), sumOfOwed, "totalOwedPayouts is not the sum of owed payouts");
+        assertEq(locked, sumOfLocks + sumOfOwed, "lockedCollateral is not the promo locks plus owed");
+        assertEq(locked, sumOfUnpaid + sumOfOwed, "lockedCollateral is not unpaid max payouts plus owed");
     }
 
     /// Every base unit is accounted for: nothing leaves the vault except withdrawals, payouts and
@@ -542,10 +616,11 @@ contract PromoVaultInvariantTest is Test {
             assertEq(claimed.length, p.claimCount);
             assertLe(p.claimCount, p.maxClaims, "more claims than maxClaims");
             assertLe(p.paidCount, p.claimCount, "more payouts than claims");
+            // Every customer payoutBatch has passed was either paid or is still owed, never both.
             assertEq(
-                paid,
+                paid + _owed(promoId, p),
                 p.payoutPerClaim * p.paidCount,
-                "a customer was paid something other than payoutPerClaim"
+                "a customer was paid or owed something other than payoutPerClaim"
             );
             assertLe(paid, p.payoutPerClaim * p.maxClaims, "paid more than the max payout");
             assertLe(p.premiumPaid, p.payoutPerClaim * p.maxClaims);
@@ -582,9 +657,13 @@ contract PromoVaultInvariantTest is Test {
     }
 
     /// F11, from any reachable state: every LP withdraws every share, then every promo that has
-    /// no final result yet resolves "yes", and every registered customer is still paid in full.
+    /// no final result yet resolves "yes", and every registered customer is still paid in full,
+    /// the ones whose payout failed earlier included once they can receive it.
     function invariant_everyLpCanLeaveAndEveryPromoStillPaysInFull() public {
         uint256 snapshot = vm.snapshotState();
+        for (uint256 i = 0; i < handler.customerCount(); i++) {
+            usdc.setBlocked(handler.customerAt(i), false);
+        }
 
         for (uint256 i = 0; i < handler.lpCount(); i++) {
             address lp = handler.lpAt(i);
@@ -622,9 +701,33 @@ contract PromoVaultInvariantTest is Test {
             );
             assertTrue(vault.getPromo(promoId).status == PromoVault.Status.PaidOut);
         }
+        for (uint256 promoId = 0; promoId < n; promoId++) {
+            address[] memory claimed = vault.getClaimants(promoId);
+            for (uint256 i = 0; i < claimed.length; i++) {
+                uint256 owed = vault.owedPayout(promoId, claimed[i]);
+                if (owed == 0) continue;
+                uint256 before = usdc.balanceOf(claimed[i]);
+                vault.retryPayout(promoId, claimed[i]);
+                assertEq(usdc.balanceOf(claimed[i]) - before, owed, "an owed payout was not paid in full");
+            }
+        }
+        assertEq(vault.totalOwedPayouts(), 0, "payouts still owed after every retry");
         assertEq(vault.lockedCollateral(), 0, "collateral still locked after every promo ended");
 
         vm.revertToState(snapshot);
+    }
+
+    /// @dev What the customers of a promo are still owed after a failed transfer. Only a customer
+    ///      payoutBatch has already passed can be owed, and only ever one payoutPerClaim.
+    function _owed(uint256 promoId, PromoVault.Promo memory p) internal view returns (uint256 sum) {
+        address[] memory claimed = vault.getClaimants(promoId);
+        for (uint256 i = 0; i < claimed.length; i++) {
+            uint256 owed = vault.owedPayout(promoId, claimed[i]);
+            if (owed == 0) continue;
+            assertLt(i, p.paidCount, "owed before payoutBatch reached the customer");
+            assertEq(owed, p.payoutPerClaim, "owed something other than payoutPerClaim");
+            sum += owed;
+        }
     }
 
     /// @dev SPEC: the sum runs over every promo that is not finalized-no, paid out or voided.
