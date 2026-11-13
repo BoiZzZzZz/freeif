@@ -123,6 +123,7 @@ contract PromoVault is EIP712 {
     );
     event Vetoed(uint256 indexed promoId);
     event SettlementReset(uint256 indexed promoId);
+    event Finalized(uint256 indexed promoId, bool outcomeYes, uint256 collateralReleased);
     event PricerSet(address indexed pricer);
     event OracleSet(address indexed oracle);
     event MaxExposureBpsSet(uint16 bps);
@@ -158,6 +159,7 @@ contract PromoVault is EIP712 {
     error ClaimsStillOpen(uint64 claimDeadline);
     error EventIdMismatch();
     error DisputeWindowOver(uint256 windowEnd);
+    error DisputeWindowOpen(uint256 windowEnd);
 
     // ---------------------------------------------------------------- setup
 
@@ -406,6 +408,31 @@ contract PromoVault is EIP712 {
         p.settledAt = 0;
 
         emit SettlementReset(promoId);
+    }
+
+    /// @notice Make a posted result final once its dispute window has ended. Anyone may call.
+    /// @dev "Yes": the lock shrinks to what the registered customers are owed, and the promo waits
+    ///      for payoutBatch (with no customers it is PaidOut at once). "No": the whole lock is
+    ///      released, and the premium inside it becomes free balance, which is the LPs' earning.
+    function finalize(uint256 promoId) external {
+        Promo storage p = _promo(promoId);
+        if (p.status != Status.Settled) revert WrongStatus(p.status);
+        uint256 windowEnd = _disputeWindowEnd(p);
+        if (block.timestamp < windowEnd) revert DisputeWindowOpen(windowEnd);
+
+        bool outcomeYes = p.outcomeYes;
+        uint256 released;
+        if (outcomeYes) {
+            released = p.payoutPerClaim * (p.maxClaims - p.claimCount);
+            p.status = p.claimCount == 0 ? Status.PaidOut : Status.FinalizedYes;
+        } else {
+            released = p.collateralLocked;
+            p.status = Status.FinalizedNo;
+        }
+        p.collateralLocked -= released;
+        lockedCollateral -= released;
+
+        emit Finalized(promoId, outcomeYes, released);
     }
 
     /// @dev The first moment a settled promo can be finalized, and the first moment a veto is

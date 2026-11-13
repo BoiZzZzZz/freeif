@@ -59,6 +59,8 @@ abstract contract VaultTest is Test {
     event Vetoed(uint256 indexed promoId);
     event SettlementReset(uint256 indexed promoId);
 
+    event Finalized(uint256 indexed promoId, bool outcomeYes, uint256 collateralReleased);
+
     function setUp() public virtual {
         (pricer, pricerPk) = makeAddrAndKey("pricer");
         usdc = new MockUSDC();
@@ -187,6 +189,13 @@ abstract contract VaultTest is Test {
         _warpToClaimDeadline(promoId);
         vm.prank(oracle);
         vault.settle(promoId, outcomeYes, EVENT_ID_PLAIN, outcomeYes ? "yes" : "no");
+    }
+
+    /// @dev Settle, wait out the dispute window and finalize.
+    function _settleAndFinalize(uint256 promoId, bool outcomeYes) internal {
+        _settle(promoId, outcomeYes);
+        vm.warp(block.timestamp + vault.disputeWindow());
+        vault.finalize(promoId);
     }
 
     /// @dev A 50-customer promo: the merchant pays `premium` and `maxPayout` is locked.

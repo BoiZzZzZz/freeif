@@ -284,3 +284,193 @@ contract VetoTest is SettlementBase {
         vault.resetSettlement(promoId);
     }
 }
+
+contract FinalizeTest is SettlementBase {
+    function _windowEnd() internal view returns (uint256) {
+        return uint256(vault.getPromo(promoId).settledAt) + vault.disputeWindow();
+    }
+
+    /// Yes with 3 of 10 customers: 7 unused payouts go back to the LPs, 3 stay locked.
+    function test_finalize_yes_releasesTheUnclaimedPayouts() public {
+        _settle(promoId, true);
+        vm.warp(_windowEnd());
+
+        vm.expectEmit(address(vault));
+        emit Finalized(promoId, true, 7 * PAYOUT);
+        vault.finalize(promoId);
+
+        _assertStatus(promoId, PromoVault.Status.FinalizedYes);
+        assertEq(vault.getPromo(promoId).collateralLocked, 3 * PAYOUT);
+        assertEq(vault.lockedCollateral(), 3 * PAYOUT);
+        assertEq(vault.freeBalance(), LIQUIDITY + PREMIUM - 3 * PAYOUT);
+        assertEq(usdc.balanceOf(address(vault)), LIQUIDITY + PREMIUM, "finalize moves no USDC");
+    }
+
+    /// No: the whole lock is released and the premium is now the LPs' earning.
+    function test_finalize_no_releasesEverythingAndThePremiumIsEarned() public {
+        _settle(promoId, false);
+        vm.warp(_windowEnd());
+
+        vm.expectEmit(address(vault));
+        emit Finalized(promoId, false, MAX_PAYOUT);
+        vault.finalize(promoId);
+
+        _assertStatus(promoId, PromoVault.Status.FinalizedNo);
+        assertEq(vault.getPromo(promoId).collateralLocked, 0);
+        assertEq(vault.lockedCollateral(), 0);
+        assertEq(vault.freeBalance(), LIQUIDITY + PREMIUM);
+
+        uint256 aliceShares = vault.shares(alice);
+        vm.prank(alice);
+        uint256 out = vault.withdraw(aliceShares);
+        assertApproxEqAbs(out, LIQUIDITY + PREMIUM, 1_100, "alice leaves with her deposit plus the premium");
+    }
+
+    function test_finalize_yes_withEveryClaimTaken_releasesNothing() public {
+        _claimMany(promoId, 7);
+        _settle(promoId, true);
+        vm.warp(_windowEnd());
+
+        vm.expectEmit(address(vault));
+        emit Finalized(promoId, true, 0);
+        vault.finalize(promoId);
+
+        _assertStatus(promoId, PromoVault.Status.FinalizedYes);
+        assertEq(vault.lockedCollateral(), MAX_PAYOUT);
+    }
+
+    /// Yes with no customers: nothing to pay, so the promo is done.
+    function test_finalize_yes_withNoClaims_isPaidOutAtOnce() public {
+        uint256 empty = _createPromo(PAYOUT, MAX_CLAIMS, PREMIUM);
+        _settle(empty, true);
+        vm.warp(block.timestamp + vault.disputeWindow());
+
+        vm.expectEmit(address(vault));
+        emit Finalized(empty, true, MAX_PAYOUT);
+        vault.finalize(empty);
+
+        _assertStatus(empty, PromoVault.Status.PaidOut);
+        assertEq(vault.getPromo(empty).collateralLocked, 0);
+        assertEq(vault.lockedCollateral(), MAX_PAYOUT, "only the other promo is still locked");
+    }
+
+    function test_finalize_canBeCalledByAnyone() public {
+        _settle(promoId, false);
+        vm.warp(_windowEnd());
+
+        vm.prank(makeAddr("a stranger"));
+        vault.finalize(promoId);
+
+        _assertStatus(promoId, PromoVault.Status.FinalizedNo);
+    }
+
+    function test_finalize_revertsOneSecondBeforeTheWindowEnds() public {
+        _settle(promoId, true);
+        uint256 windowEnd = _windowEnd();
+        vm.warp(windowEnd - 1);
+
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.DisputeWindowOpen.selector, windowEnd));
+        vault.finalize(promoId);
+    }
+
+    function test_finalize_revertsRightAfterSettle() public {
+        _settle(promoId, true);
+
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.DisputeWindowOpen.selector, _windowEnd()));
+        vault.finalize(promoId);
+    }
+
+    /// At every moment after settle exactly one of the two is possible: a veto, or finalize.
+    function testFuzz_vetoAndFinalizeNeverOverlap(uint32 wait) public {
+        _settle(promoId, true);
+        uint256 windowEnd = _windowEnd();
+        vm.warp(block.timestamp + bound(wait, 0, 30 days));
+
+        if (block.timestamp < windowEnd) {
+            vm.expectRevert(abi.encodeWithSelector(PromoVault.DisputeWindowOpen.selector, windowEnd));
+            vault.finalize(promoId);
+            vault.veto(promoId);
+        } else {
+            vm.expectRevert(abi.encodeWithSelector(PromoVault.DisputeWindowOver.selector, windowEnd));
+            vault.veto(promoId);
+            vault.finalize(promoId);
+        }
+    }
+
+    function test_finalize_revertsUnlessSettled() public {
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.Open));
+        vault.finalize(promoId);
+
+        _settle(promoId, true);
+        vault.veto(promoId);
+        vm.warp(_windowEnd());
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.Vetoed));
+        vault.finalize(promoId);
+    }
+
+    function test_finalize_revertsWhenCalledTwice() public {
+        _settleAndFinalize(promoId, false);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.FinalizedNo)
+        );
+        vault.finalize(promoId);
+        assertEq(vault.lockedCollateral(), 0);
+    }
+
+    function test_finalize_revertsForAnUnknownPromo() public {
+        vm.expectRevert(abi.encodeWithSelector(PromoVault.UnknownPromo.selector, 9));
+        vault.finalize(9);
+    }
+
+    /// The window is read when finalize is called, so the demo can shorten it.
+    function test_finalize_usesTheCurrentDisputeWindow() public {
+        _settle(promoId, false);
+        vault.setDisputeWindow(60);
+
+        vm.warp(block.timestamp + 59);
+        vm.expectRevert();
+        vault.finalize(promoId);
+
+        vm.warp(block.timestamp + 1);
+        vault.finalize(promoId);
+    }
+
+    function test_finalize_worksWhilePaused() public {
+        _settle(promoId, true);
+        vault.pause();
+        vm.warp(_windowEnd());
+        vault.finalize(promoId);
+        _assertStatus(promoId, PromoVault.Status.FinalizedYes);
+    }
+
+    function test_veto_revertsAfterFinalize() public {
+        _settleAndFinalize(promoId, true);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.FinalizedYes)
+        );
+        vault.veto(promoId);
+    }
+
+    function test_settle_revertsAfterFinalize() public {
+        _settleAndFinalize(promoId, false);
+
+        vm.prank(oracle);
+        vm.expectRevert(
+            abi.encodeWithSelector(PromoVault.WrongStatus.selector, PromoVault.Status.FinalizedNo)
+        );
+        vault.settle(promoId, true, EVENT_ID_PLAIN, "yes");
+    }
+
+    /// Releasing one promo leaves the other promo's lock alone.
+    function test_finalize_onlyReleasesItsOwnPromo() public {
+        uint256 other = _createPromo(50 * USDC, 4, 90 * USDC);
+
+        _settleAndFinalize(promoId, false);
+
+        assertEq(vault.lockedCollateral(), 200 * USDC);
+        assertEq(vault.getPromo(other).collateralLocked, 200 * USDC);
+        _assertStatus(other, PromoVault.Status.Open);
+    }
+}
