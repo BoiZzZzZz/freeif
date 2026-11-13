@@ -8,7 +8,7 @@ import { getEvent, isIntervalMarket, priceToBps, ruleText, toUnix, type GeminiCo
 import { pendingLabel, prunePending, type Label } from "./labels.ts";
 import { displayNames } from "./names.ts";
 import { keepPending } from "./odds.ts";
-import { checkLimits, maxCustomers, price, type Limit, type Price, type PricingParams, type VaultState } from "./pricing.ts";
+import { chanceOf, checkLimits, forBook, maxCustomers, price, type Limit, type Price, type PricingParams, type VaultState } from "./pricing.ts";
 import type { Store } from "./store.ts";
 
 export type PriceRequest = {
@@ -76,7 +76,11 @@ type Deps = {
 type Prepared = {
   event: GeminiEvent;
   contract: GeminiContract;
-  askBps: number;
+  /** The chance the price is made on, in 10,000. */
+  chanceBps: number;
+  /** True when the book is not a market: the price carries the wider spread. */
+  thin: boolean;
+  spreadBps: number;
   fetchedAt: number;
   claimDeadline: number;
   marketCloseTime: number;
@@ -180,7 +184,7 @@ export class Pricer {
     // The price this quote was made on is the first point of the promo's chart, if the quote is used.
     keepPending(store.data.pendingOdds, quote.nonce, [
       p.fetchedAt,
-      p.askBps,
+      p.chanceBps,
       priceToBps(p.contract.prices?.bestBid),
       priceToBps(p.contract.prices?.bestAsk),
     ]);
@@ -209,8 +213,16 @@ export class Pricer {
       throw new Refusal("market-closed", "This event is no longer open.");
     }
 
-    const askBps = priceToBps(contract.prices?.bestAsk) ?? priceToBps(contract.prices?.lastTradePrice);
-    if (askBps === null) throw new Refusal("no-price", "There is no price for this result right now.");
+    // The chance comes from the ask of a book that is a market. A thin book (a side missing, or the two
+    // sides far apart) is priced on the highest price it shows, with the wider spread, and only when
+    // there has been a trade.
+    const read = chanceOf({
+      bid: priceToBps(contract.prices?.bestBid),
+      ask: priceToBps(contract.prices?.bestAsk),
+      last: priceToBps(contract.prices?.lastTradePrice),
+    });
+    if (read === null) throw new Refusal("no-price", "There is no price for this result right now.");
+    const { chanceBps, thin } = read;
 
     // The latest moment a promo may take customers: kickoff for a game. An interval market (the test loop)
     // has no kickoff worth waiting for, so it takes customers until shortly before it closes.
@@ -234,19 +246,21 @@ export class Pricer {
     }
 
     const vault = await this.#readVault(now);
-    const { params } = this.#d;
-    const computed = price(askBps, req.payoutPerClaim, req.maxClaims, vault, params);
+    const params = forBook(this.#d.params, thin);
+    const computed = price(chanceBps, req.payoutPerClaim, req.maxClaims, vault, params);
     return {
       event,
       contract,
-      askBps,
+      chanceBps,
+      thin,
+      spreadBps: params.spreadBps,
       fetchedAt,
       claimDeadline,
       marketCloseTime,
       vault,
       price: computed,
       limit: checkLimits(computed, vault, params),
-      maxCustomers: maxCustomers(askBps, req.payoutPerClaim, vault, params),
+      maxCustomers: maxCustomers(chanceBps, req.payoutPerClaim, vault, params),
     };
   }
 
@@ -312,7 +326,7 @@ export class Pricer {
       /** The three lines of the price card, in USDC base units (6 decimals). */
       breakdown: {
         /** The chance of a "yes", from Gemini's ask: 0.39 is 39%. */
-        chance: p.askBps / 10_000,
+        chance: p.chanceBps / 10_000,
         mostOwed: p.price.maxPayout.toString(),
         expectedLoss: p.price.expectedLoss.toString(),
         fee: p.price.fee.toString(),
@@ -327,7 +341,10 @@ export class Pricer {
         bestBid: p.contract.prices?.bestBid ?? null,
         lastTradePrice: p.contract.prices?.lastTradePrice ?? null,
         askFetchedAt: p.fetchedAt,
-        spreadBps: params.spreadBps,
+        /** The spread this price carries: the usual one, or the wider one of a thin book. */
+        spreadBps: p.spreadBps,
+        /** True when the book is not a market: a side is missing, or its sides are more than half a dollar apart. */
+        thin: p.thin,
         loading: p.price.loading.toString(),
         utilizationBps: p.price.utilizationBps,
         maxLockedBps: params.maxLockedBps,

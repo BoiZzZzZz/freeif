@@ -39,7 +39,7 @@ Settings come from the environment. On a developer machine they are read from `~
 | `FEED_RPC_MS`, `FEED_GRACE_MS`, `FEED_START_BLOCK` | The keeper's own read of the vault's logs: how often (2000), how long a log waits for the Stream first (4000), and where the first read starts (default: the vault's first block, found by itself) |
 | `USDC_ADDRESS`, `GEMINI_BASE` | Defaults: Arc testnet USDC, `https://api.gemini.com` |
 | `PORT`, `KEEPER_LOOP_MS`, `KEEPER_RETRY_MS`, `KEEPER_DATA_DIR` | Defaults: 8787, 30000, 600000, `./data` |
-| `SPREAD_BPS`, `MAX_LOCKED_BPS`, `EXPOSURE_HEADROOM_BPS`, `LOADING_BPS_PER_STEP` | Pricing settings. Defaults: 500, 6000, 9000, 0 |
+| `SPREAD_BPS`, `THIN_SPREAD_BPS`, `MAX_LOCKED_BPS`, `EXPOSURE_HEADROOM_BPS`, `LOADING_BPS_PER_STEP` | Pricing settings. Defaults: 500, 1500, 6000, 9000, 0 |
 
 ## API
 
@@ -50,7 +50,7 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 | `GET /health` | The vault, the three service addresses, the latest block, the commit the hosted build was made from, and `stream`: deliveries so far, how many carried QuickNode's signature, when the last one came, how many events the feed holds and how many of them the Stream delivered |
 | `GET /health/rpc` | Whether each RPC endpoint answers, and how fast |
 | `GET /games?league=nba` | One league's games that have not started, soonest first: `eventTicker`, `game` ("Cavaliers at Heat"), `startTime`, and for each team its `instrumentSymbol`, `team`, `condition` ("the Heat win"), `chance` and `quotable`. `leagues` lists the leagues (`nfl`, `nba`, `nhl`, `ncaaf`, `ncaam`) |
-| `GET /price?eventTicker=&instrumentSymbol=&payoutPerClaim=&maxClaims=&claimDeadline=` | The price of a promo, unsigned. `breakdown` has `chance`, `mostOwed`, `fee` and `cost`; `maxCustomers` is the most the vault can cover right now; `limit` is `ok` or the limit the request is over; `display` has the words for the card (`game`, `team`, `subject`, `condition`, `league`, `startTime`) and `rule` is Gemini's rule for the result |
+| `GET /price?eventTicker=&instrumentSymbol=&payoutPerClaim=&maxClaims=&claimDeadline=` | The price of a promo, unsigned. `breakdown` has `chance`, `mostOwed`, `fee` and `cost`; `mechanics` has the bid, the ask, the last trade, the spread used and `thin` (the book is not a market, so the spread is the wider one); `maxCustomers` is the most the vault can cover right now; `limit` is `ok` or the limit the request is over; `display` has the words for the card (`game`, `team`, `subject`, `condition`, `league`, `startTime`) and `rule` is Gemini's rule for the result |
 | `POST /quote` | Body: the same fields plus `merchant` (and `hedgeMode`, and `item` and `business` for the promo's card). Returns the price plus `quote` and `signature` for `createPromo(quote, signature)`. Good for 90 seconds, for that merchant only. Answers 422 with a reason when the vault cannot take the promo |
 | `POST /claims` | Body: `promoId`, `customer`, `userToken` (the customer's Circle login token from the web app). The keeper asks Circle whose token it is, then registers the customer on chain. 401 `login` when Circle does not know the token (it lasts an hour), 403 `not-your-wallet` when `customer` is not one of that user's wallets on Arc, 409 `already-claimed` when that user has claimed this promo with another wallet, 502 `failed` when Circle or the chain cannot be reached. A repeated claim answers 200 with `alreadyRegistered: true` and sends nothing. The test loop sends `testUser` (any name) in place of `userToken`, with the header `X-Test-Key: <CLAIM_TEST_KEY>` |
 | `GET /promos/:id` | The promo as the chain has it, with the event and result names behind its two hashes, the words for the card, `item` and `business`, `events` (the promo's events on the vault, oldest first, each with `via`: `stream` or `rpc`), `stream` (the Stream's deliveries so far and the time of the last) and `txs` (the transactions the keeper sent for it). With `?customer=0x...` it adds `customer`: that address's place in line, and whether it has been paid. The chain is read once a second per promo at most, however many pages ask |
@@ -67,7 +67,7 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 ## The game list and the words on the card
 
 - Gemini lists every market of a game as its own event, and a page of 100 events is 3 to 12 MB. The keeper asks one league at a time with Gemini's `search` filter, keeps the events whose ticker ends in `-M` (the game's winner), and holds each league's list in memory. A list older than two minutes is served as it is while a new one is read, so only the first read after a start waits for Gemini; the keeper does that read itself when it starts.
-- A team can be picked when it has both a bid and an ask and is not too likely. An empty book shows an ask of 0.02 with no bid; that is not a 2% chance.
+- A team can be picked when its book is a market (a bid and an ask at most half a dollar apart) and it is not too likely. An empty book shows an ask of 0.02 with no bid; that is not a 2% chance.
 - Names come from Gemini, never from the merchant: a pro team goes by its nickname ("Miami" with the participant "Miami Heat" is "the Heat"), a college by its own name. What a merchant does send, with the quote request, is what is free and the shop's name (`item`, `business`, 40 characters each). They are tied to the promo the first time it is read: a promo can only carry a quote's exact merchant, amounts and deadline if the pricer signed that quote.
 
 ## The odds history
@@ -110,7 +110,8 @@ Status on Nov 13: the webhook, the feed, the keeper's own read and the pages are
 ## Pricing rules
 
 - `premium = expectedLoss * 1.05`, rounded up to a cent, where `expectedLoss = ask * payoutPerClaim * maxClaims`. Never below `expectedLoss * 1.02`.
-- A quote is refused when the event has started, when there is no ask, when the result is so likely that the premium would exceed the payout, or when the vault is paused.
+- The chance is the ask of a book that is a market: someone on each side, at most half a dollar apart. Any other book is thin: a side is missing, or the two are a placeholder (a 5-minute window that has not started shows 0.01 against 0.99). A thin book is priced on the highest price it shows (ask, bid or last trade) with a spread of 15% in place of 5%, and only if the result has traded: an offer with nobody on the other side and no trade behind it is not a price. The answer says so (`mechanics.thin`, `mechanics.spreadBps`).
+- A quote is refused when the event has started, when there is no price by the rule above, when the result is so likely that the premium would exceed the payout, or when the vault is paused.
 - Two limits on size. The contract's exposure cap: `maxPayout - premium` may be at most 20% of the vault's free balance, and the keeper uses 90% of that so a small withdrawal does not make a quote revert. And a ceiling across promos: no quote may leave more than 60% of the vault locked.
 - Quotes that are signed and not yet used or expired count against both limits as if their promos existed.
 

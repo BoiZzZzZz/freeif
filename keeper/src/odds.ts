@@ -4,6 +4,7 @@
 // as its chart.
 import type { Hex } from "viem";
 import { getBook, priceToBps, type TopOfBook } from "./gemini.ts";
+import { isMarket } from "./pricing.ts";
 import type { Store } from "./store.ts";
 
 /**
@@ -21,20 +22,18 @@ export type OpenPromo = { promoId: string; instrumentSymbol: Hex };
 const KEEP_EVERY_SECONDS = 300;
 /** The most readings kept for one promo. Past it, the older half loses every second one. */
 const MAX_POINTS = 4_000;
-/** A bid and an ask further apart than this are a placeholder, not a market. */
-const MAX_SPREAD_BPS = 5_000;
 const MAX_PENDING = 2_000;
 const PENDING_SECONDS = 86_400;
 
 /**
- * The chance a book shows: its best ask. Null when the book is no price: a side is missing (an empty
- * book on Gemini shows an ask of 0.02 and no bid), or the two sides are more than half a dollar apart
- * (a window that has not started shows 0.01 against 0.99).
+ * The chance a book shows: its best ask. Null when the book is not a market (pricing.ts): a side is
+ * missing (an empty book on Gemini shows an ask of 0.02 and no bid), or the two sides are more than half
+ * a dollar apart (a window that has not started shows 0.01 against 0.99).
  */
 export function readBook(book: TopOfBook, t: number): OddsPoint | null {
   const bid = priceToBps(book.bid ?? undefined);
   const ask = priceToBps(book.ask ?? undefined);
-  if (bid === null || ask === null || ask - bid > MAX_SPREAD_BPS) return null;
+  if (ask === null || !isMarket(bid, ask)) return null;
   return [t, ask, bid, ask];
 }
 

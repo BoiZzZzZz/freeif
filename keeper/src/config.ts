@@ -72,6 +72,8 @@ export const feedSettings = () => ({
 export function pricingParams(): PricingParams {
   return {
     spreadBps: int("SPREAD_BPS", 500),
+    // A book with a side missing, or with its sides more than half a dollar apart, is priced with this.
+    thinSpreadBps: int("THIN_SPREAD_BPS", 1500),
     minMarkupBps: int("MIN_MARKUP_BPS", 200),
     loadingStepBps: int("LOADING_STEP_BPS", 500),
     // Off until the loading formula is decided: the premium is the flat spread. 100 turns on SPEC's

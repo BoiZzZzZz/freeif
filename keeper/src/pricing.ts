@@ -3,6 +3,8 @@
 export type PricingParams = {
   /** Margin on top of the expected loss. 500 = 5%. */
   spreadBps: number;
+  /** The margin when the book is thin (see `chanceOf`). 1500 = 15%. */
+  thinSpreadBps: number;
   /** The premium is never below the expected loss plus this. 200 = 2%. */
   minMarkupBps: number;
   /** Size of one loading step, as a share of the vault that is locked. 500 = every 5%. */
@@ -43,11 +45,39 @@ export type Price = {
 
 export type Limit = "ok" | "too-likely" | "exposure" | "ceiling";
 
+/** What Gemini shows for a result, in basis points of a dollar (3900 is 0.39). Null where it shows none. */
+export type Book = { bid: number | null; ask: number | null; last: number | null };
+
+/** A bid and an ask further apart than this are not a market. */
+export const MAX_BOOK_WIDTH_BPS = 5_000;
+
+/** A book is a market when someone is on each side of it, at most half a dollar apart. */
+export const isMarket = (bid: number | null, ask: number | null): boolean =>
+  bid !== null && ask !== null && ask - bid <= MAX_BOOK_WIDTH_BPS;
+
+/**
+ * The chance a promo is priced on.
+ * - A market: its ask, the price a hedge would cost.
+ * - Any other book is thin. One offer with nobody on the other side says little: an empty book on Gemini
+ *   shows an ask of 0.02 and no bid, and a window that has not started shows 0.01 against 0.99. The
+ *   chance is then the highest of the ask, the bid and the last trade, the price carries the wider
+ *   spread, and with no trade to go by there is no price (null).
+ */
+export function chanceOf(book: Book): { chanceBps: number; thin: boolean } | null {
+  if (isMarket(book.bid, book.ask)) return { chanceBps: book.ask!, thin: false };
+  if (book.last === null) return null;
+  return { chanceBps: Math.max(book.last, book.ask ?? 0, book.bid ?? 0), thin: true };
+}
+
 const BPS = 10_000n;
 const CENT = 10_000n; // one cent in USDC base units
 
 const ceilDiv = (a: bigint, b: bigint): bigint => (a + b - 1n) / b;
 const ceilToCent = (amount: bigint): bigint => ceilDiv(amount, CENT) * CENT;
+
+/** `params` with the spread a thin book carries. */
+export const forBook = (params: PricingParams, thin: boolean): PricingParams =>
+  thin ? { ...params, spreadBps: Math.max(params.spreadBps, params.thinSpreadBps) } : params;
 
 /** The premium for `maxClaims` customers at `payoutPerClaim` each, at a chance of `askBps` in 10,000. */
 export function price(

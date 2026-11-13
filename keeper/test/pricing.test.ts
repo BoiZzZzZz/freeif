@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkLimits, maxCustomers, price, type PricingParams, type VaultState } from "../src/pricing.ts";
+import { chanceOf, checkLimits, forBook, isMarket, maxCustomers, price, type PricingParams, type VaultState } from "../src/pricing.ts";
 
 const USDC = 1_000_000n;
 const params: PricingParams = {
   spreadBps: 500,
+  thinSpreadBps: 1500,
   minMarkupBps: 200,
   loadingStepBps: 500,
   loadingBpsPerStep: 0,
@@ -120,4 +121,50 @@ test("maxCustomers_isTheLargestCountThatFits", () => {
 
 test("maxCustomers_emptyVault_isZero", () => {
   assert.equal(maxCustomers(3900, 20n * USDC, vault(0n), params), 0);
+});
+
+test("isMarket_needsSomeoneOnEachSide_atMostHalfADollarApart", () => {
+  assert.ok(isMarket(4200, 4300));
+  assert.ok(isMarket(2000, 7000));
+  assert.ok(!isMarket(2000, 7100));
+  // A window that has not started: a placeholder on each side.
+  assert.ok(!isMarket(100, 9900));
+  // An empty book on Gemini: an ask of 0.02 and nobody bidding.
+  assert.ok(!isMarket(null, 200));
+  assert.ok(!isMarket(4000, null));
+  assert.ok(!isMarket(null, null));
+});
+
+test("chanceOf_aMarket_isPricedOnItsAsk", () => {
+  assert.deepEqual(chanceOf({ bid: 4200, ask: 4300, last: 4100 }), { chanceBps: 4300, thin: false });
+  // The last trade plays no part in a market, above the ask or not there at all.
+  assert.deepEqual(chanceOf({ bid: 4200, ask: 4300, last: 6000 }), { chanceBps: 4300, thin: false });
+  assert.deepEqual(chanceOf({ bid: 4200, ask: 4300, last: null }), { chanceBps: 4300, thin: false });
+});
+
+test("chanceOf_aThinBook_isPricedOnTheHighestPriceItShows", () => {
+  // The empty book of an underdog that last traded at 0.40: the 0.02 ask is not its chance.
+  assert.deepEqual(chanceOf({ bid: null, ask: 200, last: 4000 }), { chanceBps: 4000, thin: true });
+  // No ask: the last trade, as before.
+  assert.deepEqual(chanceOf({ bid: null, ask: null, last: 4100 }), { chanceBps: 4100, thin: true });
+  // An offer above the last trade, a bid above it.
+  assert.deepEqual(chanceOf({ bid: null, ask: 3500, last: 3000 }), { chanceBps: 3500, thin: true });
+  assert.deepEqual(chanceOf({ bid: 6000, ask: null, last: 5000 }), { chanceBps: 6000, thin: true });
+  // Two sides that are too far apart to be a market.
+  assert.deepEqual(chanceOf({ bid: 100, ask: 9000, last: 5000 }), { chanceBps: 9000, thin: true });
+});
+
+test("chanceOf_aThinBookThatNeverTraded_isNoPrice", () => {
+  assert.equal(chanceOf({ bid: null, ask: 200, last: null }), null);
+  assert.equal(chanceOf({ bid: 3800, ask: null, last: null }), null);
+  assert.equal(chanceOf({ bid: 100, ask: 9900, last: null }), null);
+  assert.equal(chanceOf({ bid: null, ask: null, last: null }), null);
+});
+
+test("forBook_aThinBookCarriesTheWiderSpread_neverANarrowerOne", () => {
+  assert.equal(forBook(params, false).spreadBps, 500);
+  assert.equal(forBook(params, true).spreadBps, 1500);
+  assert.equal(forBook({ ...params, spreadBps: 2000 }, true).spreadBps, 2000);
+  // 39% of 4,000 is 1,560; at 15% the cost is 1,794.
+  assert.equal(price(3900, 20n * USDC, 200, vault(20_000n * USDC), forBook(params, true)).premium, 1_794n * USDC);
 });

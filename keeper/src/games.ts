@@ -6,6 +6,7 @@
 // keeper asks league by league with Gemini's `search` filter, keeps only the winner markets, and holds
 // each league's list in memory. A list that has gone old is served as it is while a new one is read.
 import { listEvents, priceToBps, toUnix, type GeminiEvent } from "./gemini.ts";
+import { isMarket } from "./pricing.ts";
 import { displayNames } from "./names.ts";
 
 /** The tabs of the form, in order. `search` is the start of Gemini's tickers for the league. */
@@ -95,7 +96,8 @@ export function toGames(events: GeminiEvent[], nowSeconds: number, rules: Rules)
           condition: names.condition,
           chance: ask === null ? null : ask / 10_000,
           // A price with nobody on the other side is not a chance: an empty book shows an ask of 0.02.
-          quotable: open && ask !== null && bid !== null && !tooLikely,
+          // The same rule as the pricing service: only a book that is a market is offered.
+          quotable: open && isMarket(bid, ask) && !tooLikely,
         };
       });
     if (teams.length < 2 || !teams.some((t) => t.quotable)) continue;

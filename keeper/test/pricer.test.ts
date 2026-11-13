@@ -19,6 +19,7 @@ const iso = (unix: number) => new Date(unix * 1000).toISOString();
 
 const params: PricingParams = {
   spreadBps: 500,
+  thinSpreadBps: 1500,
   minMarkupBps: 200,
   loadingStepBps: 500,
   loadingBpsPerStep: 0,
@@ -62,7 +63,7 @@ const window5m = (closeIn: number): GeminiEvent => ({
       instrumentSymbol: "GEMI-BTC05M2611130405-UP",
       marketState: "open",
       expiryDate: iso(NOW + closeIn),
-      prices: { bestAsk: "0.5" },
+      prices: { bestBid: "0.49", bestAsk: "0.5" },
     },
   ],
 });
@@ -213,10 +214,55 @@ test("getPrice_refusesWhatItCannotPrice", async () => {
   await refusal(setup(game()).pricer.getPrice({ ...wings, payoutPerClaim: 0n }), "bad-request");
 });
 
-test("getPrice_noAsk_fallsBackToTheLastTrade", async () => {
+test("getPrice_noAsk_fallsBackToTheLastTrade_withTheWiderSpread", async () => {
   const event = game();
   event.contracts[0]!.prices = { lastTradePrice: "0.41" };
-  assert.equal((await setup(event).pricer.getPrice(wings)).breakdown.chance, 0.41);
+  const p = await setup(event).pricer.getPrice(wings);
+  assert.equal(p.breakdown.chance, 0.41);
+  assert.deepEqual([p.mechanics.thin, p.mechanics.spreadBps], [true, 1500]);
+  // 41% of 4,000 is 1,640; at 15% the cost is 1,886.
+  assert.equal(p.breakdown.cost, "1886000000");
+});
+
+test("getPrice_aMarket_carriesTheUsualSpread", async () => {
+  const p = await setup(game()).pricer.getPrice(wings);
+  assert.deepEqual([p.mechanics.thin, p.mechanics.spreadBps], [false, 500]);
+});
+
+test("getPrice_anEmptyBooksAsk_isNotTakenAsTheChance", async () => {
+  // Gemini shows an ask of 0.02 and no bid on a result nobody is quoting.
+  const stub = game();
+  stub.contracts[0]!.prices = { bestAsk: "0.02" };
+  await refusal(setup(stub).pricer.getPrice(wings), "no-price");
+  await refusal(setup(stub).pricer.signQuote({ ...wings, merchant: MERCHANT }), "no-price");
+
+  // The same book on a result that last traded at 0.40 is priced at 40%, with the wider spread.
+  const traded = game();
+  traded.contracts[0]!.prices = { bestAsk: "0.02", lastTradePrice: "0.40" };
+  const p = await setup(traded).pricer.getPrice(wings);
+  assert.equal(p.breakdown.chance, 0.4);
+  assert.equal(p.mechanics.thin, true);
+  assert.equal(p.breakdown.cost, "1840000000");
+});
+
+test("getPrice_aBookWithItsSidesFarApart_isThin", async () => {
+  // SPEC's example: an ask of 0.90 against a bid of 0.01 is not a 90% chance at the usual spread.
+  const wide = game();
+  wide.contracts[0]!.prices = { bestBid: "0.01", bestAsk: "0.90" };
+  await refusal(setup(wide).pricer.getPrice(wings), "no-price");
+  wide.contracts[0]!.prices = { bestBid: "0.01", bestAsk: "0.60", lastTradePrice: "0.55" };
+  const p = await setup(wide).pricer.getPrice(wings);
+  assert.deepEqual([p.breakdown.chance, p.mechanics.thin, p.mechanics.spreadBps], [0.6, true, 1500]);
+});
+
+test("signQuote_aThinBook_signsThePriceWithTheWiderSpread_andKeepsItsChanceForTheChart", async () => {
+  const event = game();
+  event.contracts[0]!.prices = { bestAsk: "0.35", lastTradePrice: "0.30" };
+  const { pricer, store } = setup(event);
+  const res = await pricer.signQuote({ ...wings, merchant: MERCHANT });
+  // 35% of 4,000 is 1,400; at 15% the premium is 1,610.
+  assert.equal(res.quote.premium, "1610000000");
+  assert.deepEqual(store.data.pendingOdds[res.quote.nonce], [NOW, 3500, null, 3500]);
 });
 
 test("signQuote_overCapacity_saysHowManyCustomersFit", async () => {
@@ -232,7 +278,7 @@ test("signQuote_overCapacity_saysHowManyCustomersFit", async () => {
 
 test("signQuote_tooLikely_isRefused", async () => {
   const event = game();
-  event.contracts[0]!.prices = { bestAsk: "0.97" };
+  event.contracts[0]!.prices = { bestBid: "0.96", bestAsk: "0.97" };
   await refusal(setup(event).pricer.signQuote({ ...wings, maxClaims: 1, merchant: MERCHANT }), "too-likely");
 });
 
