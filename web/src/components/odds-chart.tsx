@@ -36,7 +36,20 @@ export function OddsChart({ promo, odds, merchant, mechanics }: { promo: Promo; 
     if (odds?.latest && odds.latest[0] > (series.at(-1)?.[0] ?? 0)) series.push(odds.latest);
     const first = series[0]?.[0] ?? 0;
     const span = Math.max((series.at(-1)?.[0] ?? 0) - first, 1);
-    const path = series.map((p, i) => `${i === 0 ? "M" : "L"}${(((p[0] - first) / span) * 100).toFixed(2)} ${top(p).toFixed(2)}`).join("");
+    // While the keeper is reading, two readings that differ are one pass apart (it keeps the reading
+    // before every change). Two that differ and are further apart have a stretch with no reading between
+    // them: the book was no price, or the keeper was down. The line holds its level across that stretch
+    // and steps at the new reading, where a straight line would draw a slope nobody saw.
+    const stretch = (odds?.everySeconds ?? 30) * 2.5;
+    let path = "";
+    series.forEach((p, i) => {
+      const x = (((p[0] - first) / span) * 100).toFixed(2);
+      const y = top(p).toFixed(2);
+      const before = series[i - 1];
+      if (before === undefined) path += `M${x} ${y}`;
+      else if (p[1] !== before[1] && p[0] - before[0] > stretch) path += `H${x}V${y}`;
+      else path += `L${x} ${y}`;
+    });
     return { series, path };
   }, [odds]);
 
