@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import { privateKeyToAccount } from "viem/accounts";
 import { promoVaultAbi } from "./abi.ts";
 import { makePublicClient, makeWalletClient } from "./chain.ts";
+import { makeIdentify } from "./circle.ts";
 import * as config from "./config.ts";
 import { Games } from "./games.ts";
 import { Keeper } from "./keeper.ts";
@@ -34,7 +35,7 @@ if (!same(vaultPricer, pricerAccount.address)) throw new Error(`PRICER_PK is ${p
 if (!same(vaultOracle, oracleWallet.account.address)) throw new Error(`ORACLE_PK is ${oracleWallet.account.address}, the vault's oracle is ${vaultOracle}`);
 if (!same(vaultUsdc, usdc)) throw new Error(`USDC_ADDRESS is ${usdc}, the vault's token is ${vaultUsdc}`);
 
-const relayer = new Relayer({ client, wallet: relayerWallet, vault, store });
+const relayer = new Relayer({ client, wallet: relayerWallet, vault, store, identify: makeIdentify(config.circleApiKey()) });
 const pricer = new Pricer({
   client,
   vault,
@@ -48,7 +49,7 @@ const pricer = new Pricer({
 const keeper = new Keeper({ client, wallet: oracleWallet, vault, store });
 const games = new Games({ spreadBps: config.pricingParams().spreadBps, minLeadSeconds: timing.minClaimWindowSeconds });
 
-const app = makeApp({ client, vault, pricer, games, relayer, oracle: keeper.address, store });
+const app = makeApp({ client, vault, pricer, games, relayer, oracle: keeper.address, store, testKey: config.claimTestKey() });
 const server = serve({ fetch: app.fetch, port: config.port(), hostname: "0.0.0.0" }, (info) => {
   console.log(`[server] listening on ${info.port}; vault ${vault}; RPCs: ${config.rpcUrls().length}`);
 });

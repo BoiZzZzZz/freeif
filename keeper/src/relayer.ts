@@ -1,18 +1,23 @@
 // The claim relayer. Its key is every promo's `claimSigner` (F17), so it is the only address that can
-// register a customer. It allows one claim per email per promo.
+// register a customer. A claim carries the customer's Circle login token: the relayer asks Circle whose
+// it is, registers only an address that is one of that user's wallets, and allows one claim per Circle
+// user per promo.
 import { createHash } from "node:crypto";
 import { BaseError, ContractFunctionRevertedError, isAddress, parseEventLogs, type Address, type Hex } from "viem";
 import { promoVaultAbi } from "./abi.ts";
 import { Status, statusName, type PublicClient, type WalletClient } from "./chain.ts";
+import type { Identify } from "./circle.ts";
 import type { Store } from "./store.ts";
 
 export type ClaimRefusalCode =
   | "bad-request"
+  | "login"
+  | "not-your-wallet"
   | "unknown-promo"
   | "not-our-promo"
   | "closed"
   | "full"
-  | "email-used"
+  | "already-claimed"
   | "failed";
 
 export class ClaimRefusal extends Error {
@@ -33,10 +38,13 @@ export type ClaimResult = {
   txHash: Hex | null;
 };
 
-type Deps = { client: PublicClient; wallet: WalletClient; vault: Address; store: Store };
+type Deps = { client: PublicClient; wallet: WalletClient; vault: Address; store: Store; identify: Identify };
 
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const emailKey = (email: string): string => createHash("sha256").update(email.trim().toLowerCase()).digest("hex");
+// A Circle user token is a few hundred characters. Anything far longer is not one.
+const MAX_TOKEN = 4096;
+
+/** The name a claim is counted under in the keeper's file: a hash, so the file holds no user ids. */
+const claimKey = (who: string): string => createHash("sha256").update(who).digest("hex");
 
 /** The name of the custom error a contract call reverted with, or null. */
 export function revertName(err: unknown): string | null {
@@ -57,23 +65,52 @@ export class Relayer {
     return this.#d.wallet.account.address;
   }
 
-  /** Registers `customer` on the promo. One at a time, so two claims never race for a nonce or an email. */
-  registerClaim(promoId: bigint, customer: string, email: string): Promise<ClaimResult> {
-    const run = this.#queue.then(() => this.#register(promoId, customer, email));
+  /**
+   * Registers `customer` on the promo for the Circle login `userToken`. Circle is asked before the
+   * claim joins the line, so a slow answer holds up nobody else.
+   */
+  async registerClaim(promoId: bigint, customer: string, userToken: string): Promise<ClaimResult> {
+    if (!isAddress(customer)) throw new ClaimRefusal("bad-request", "That is not a wallet address.");
+    if (userToken === "" || userToken.length > MAX_TOKEN || /\s/.test(userToken)) {
+      throw new ClaimRefusal("login", "Please log in again.");
+    }
+    let user;
+    try {
+      user = await this.#d.identify(userToken);
+    } catch (err) {
+      console.error("[relayer] could not check a login with Circle:", err);
+      throw new ClaimRefusal("failed", "We can't check your login right now. Try again in a moment.");
+    }
+    if (user === null) throw new ClaimRefusal("login", "Please log in again.");
+    if (!user.wallets.some((w) => w.toLowerCase() === customer.toLowerCase())) {
+      throw new ClaimRefusal("not-your-wallet", "That login does not match this account. Please log in again.");
+    }
+    return this.#enqueue(promoId, customer, claimKey(`circle:${user.userId}`));
+  }
+
+  /**
+   * The test loop's way in: no login, a made-up user name. The server lets a request reach this only
+   * with the test key. Test names and Circle users are counted apart.
+   */
+  registerTestClaim(promoId: bigint, customer: string, testUser: string): Promise<ClaimResult> {
+    if (!isAddress(customer)) return Promise.reject(new ClaimRefusal("bad-request", "That is not a wallet address."));
+    return this.#enqueue(promoId, customer, claimKey(`test:${testUser}`));
+  }
+
+  /** One at a time, so two claims never race for a nonce or for the same user's one claim. */
+  #enqueue(promoId: bigint, customer: Address, key: string): Promise<ClaimResult> {
+    const run = this.#queue.then(() => this.#register(promoId, customer, key));
     this.#queue = run.catch(() => undefined);
     return run;
   }
 
-  async #register(promoId: bigint, customer: string, email: string): Promise<ClaimResult> {
-    if (!isAddress(customer)) throw new ClaimRefusal("bad-request", "That is not a wallet address.");
-    if (!EMAIL.test(email)) throw new ClaimRefusal("bad-request", "That is not an email address.");
+  async #register(promoId: bigint, customer: Address, key: string): Promise<ClaimResult> {
     const { client, wallet, vault, store } = this.#d;
     const id = promoId.toString();
-    const key = emailKey(email);
 
     const claimedBy = store.data.claims[id]?.[key];
     if (claimedBy !== undefined && claimedBy.toLowerCase() !== customer.toLowerCase()) {
-      throw new ClaimRefusal("email-used", "This email has already claimed this promotion.");
+      throw new ClaimRefusal("already-claimed", "This email has already claimed this promotion.");
     }
 
     const count = await client.readContract({ address: vault, abi: promoVaultAbi, functionName: "promoCount" });

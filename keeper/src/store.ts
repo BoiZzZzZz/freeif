@@ -1,6 +1,6 @@
 // What the keeper remembers between restarts, in one JSON file. The chain is the source of truth for
 // promos and money; this file only holds what the chain does not: the plain strings behind the hashes
-// in a promo, the quotes that are still usable, which emails have claimed, what each promo gives away and
+// in a promo, the quotes that are still usable, which logins have claimed, what each promo gives away and
 // for which shop, and the keeper's own tx hashes.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,7 +35,10 @@ type Data = {
   instruments: Record<Hex, InstrumentRecord>;
   /** quote nonce => a signed quote that may still be used. */
   liveQuotes: Record<Hex, LiveQuote>;
-  /** promo id => sha256(email) => the customer address that email claimed with. */
+  /**
+   * promo id => who claimed => the customer address they claimed with. "Who" is the SHA-256 of
+   * `circle:<Circle user id>` (of `test:<name>` for the test loop, and of an email before Nov 13).
+   */
   claims: Record<string, Record<string, Address>>;
   /** quote nonce => what is free and the shop's name, until the quote's promo is first read. */
   pendingLabels: Record<Hex, PendingLabel>;

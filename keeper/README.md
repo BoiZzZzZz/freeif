@@ -4,7 +4,7 @@ One Node process that does five jobs for `PromoVault`:
 
 - **Game list.** Reads Gemini's active game-winner markets league by league and serves them to the merchant form, each team with its chance and the words a customer reads ("the Lions win").
 - **Pricing.** Reads the ask for a result from Gemini's prediction-market API, adds the spread, checks the vault can cover the promo, and signs the EIP-712 quote that `createPromo` checks.
-- **Claim relayer.** Its key is every promo's claim signer, so it is the only address that can register a customer. One claim per email per promo.
+- **Claim relayer.** Its key is every promo's claim signer, so it is the only address that can register a customer. A claim carries the customer's Circle login token; the relayer asks Circle whose it is and registers only that user's own wallet, once per user per promo.
 - **Settlement loop.** Every 30 seconds: posts Gemini's result once claims are closed (`settle`), finalizes after the dispute window (`finalize`), pays the customers of a "yes" (`payoutBatch`), and retries payouts whose transfer failed (`retryPayout`).
 - **Stream webhook.** Not built yet.
 
@@ -17,7 +17,7 @@ Needs Node 24 and pnpm. TypeScript runs directly; there is no build step.
 ```
 pnpm install
 pnpm start        # the API on port 8787 and the loop
-pnpm test         # unit tests, plus three that read the deployed vault (skipped without VAULT_ADDRESS)
+pnpm test         # unit tests (Gemini, Circle and the chain are fakes), plus three that read the deployed vault (skipped without VAULT_ADDRESS)
 pnpm typecheck
 pnpm abi          # rewrite src/abi.ts after a contract change (run `forge build` in ../contracts first)
 pnpm ship         # deploy the pushed commit to Railway and wait for it
@@ -29,6 +29,8 @@ Settings come from the environment. On a developer machine they are read from `~
 |---|---|
 | `VAULT_ADDRESS` | The deployed `PromoVault` |
 | `PRICER_PK`, `ORACLE_PK`, `RELAYER_PK` | The three service keys. The keeper refuses to start if the first two are not the vault's `pricer` and `oracle` |
+| `CIRCLE_API_KEY` | Circle's API key, the one the web app uses. The relayer asks Circle whose login a claim carries. Required |
+| `CLAIM_TEST_KEY` | Optional. A secret that lets the test loop register customers that have no login (see `POST /claims`). Unset, that way in does not exist |
 | `ARC_RPC_URL`, `QUICKNODE_ARC_RPC_URL` | RPC endpoints, tried in that order. Default: the public Arc testnet RPC |
 | `USDC_ADDRESS`, `GEMINI_BASE` | Defaults: Arc testnet USDC, `https://api.gemini.com` |
 | `PORT`, `KEEPER_LOOP_MS`, `KEEPER_RETRY_MS`, `KEEPER_DATA_DIR` | Defaults: 8787, 30000, 600000, `./data` |
@@ -45,7 +47,7 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 | `GET /games?league=nba` | One league's games that have not started, soonest first: `eventTicker`, `game` ("Cavaliers at Heat"), `startTime`, and for each team its `instrumentSymbol`, `team`, `condition` ("the Heat win"), `chance` and `quotable`. `leagues` lists the leagues (`nfl`, `nba`, `nhl`, `ncaaf`, `ncaam`) |
 | `GET /price?eventTicker=&instrumentSymbol=&payoutPerClaim=&maxClaims=&claimDeadline=` | The price of a promo, unsigned. `breakdown` has `chance`, `mostOwed`, `fee` and `cost`; `maxCustomers` is the most the vault can cover right now; `limit` is `ok` or the limit the request is over; `display` has the words for the card (`game`, `team`, `subject`, `condition`, `league`, `startTime`) and `rule` is Gemini's rule for the result |
 | `POST /quote` | Body: the same fields plus `merchant` (and `hedgeMode`, and `item` and `business` for the promo's card). Returns the price plus `quote` and `signature` for `createPromo(quote, signature)`. Good for 90 seconds, for that merchant only. Answers 422 with a reason when the vault cannot take the promo |
-| `POST /claims` | Body: `promoId`, `customer`, `email`. Registers the customer on chain. 409 when the email has already claimed with another wallet |
+| `POST /claims` | Body: `promoId`, `customer`, `userToken` (the customer's Circle login token from the web app). The keeper asks Circle whose token it is, then registers the customer on chain. 401 `login` when Circle does not know the token (it lasts an hour), 403 `not-your-wallet` when `customer` is not one of that user's wallets on Arc, 409 `already-claimed` when that user has claimed this promo with another wallet, 502 `failed` when Circle or the chain cannot be reached. A repeated claim answers 200 with `alreadyRegistered: true` and sends nothing. The test loop sends `testUser` (any name) in place of `userToken`, with the header `X-Test-Key: <CLAIM_TEST_KEY>` |
 | `GET /promos/:id` | The promo as the chain has it, with the event and result names behind its two hashes, the words for the card, `item` and `business`, and `txs`: the transactions the keeper sent for it. With `?customer=0x...` it adds `customer`: that address's place in line, and whether it has been paid |
 | `GET /intervals?series=BTC05M` | The next windows of a 5 or 15-minute crypto market (the test loop) |
 
@@ -73,11 +75,11 @@ KEEPER_LOOP_MS=5000 pnpm start     # one terminal
 pnpm e2e                           # another; add --pick likely to favor a "yes"
 ```
 
-It needs `TEST_MERCHANT_PK` and `TEST_CUSTOMER_ADDRESSES` in the environment, a merchant wallet with a few USDC, and a deposit in the vault.
+It needs `TEST_MERCHANT_PK`, `TEST_CUSTOMER_ADDRESSES` and `CLAIM_TEST_KEY` in the environment, a merchant wallet with a few USDC, and a deposit in the vault. The test customers are plain keys with no Circle login, so their claims go in with the test key; the keeper must run with the same `CLAIM_TEST_KEY`. Before those claims, the script checks that a claim with no login, one with a login Circle does not know, and a test claim with the wrong key are all refused.
 
 ## Hosting
 
-The keeper runs on Railway at `https://freeif-production.up.railway.app`, built from `Dockerfile` with `keeper/` as the service's root folder. Its file is on a volume mounted at `/data` (`KEEPER_DATA_DIR=/data`), so a redeploy keeps the record of which emails have claimed. The health check is `GET /health`, which also names the commit that is live.
+The keeper runs on Railway at `https://freeif-production.up.railway.app`, built from `Dockerfile` with `keeper/` as the service's root folder. Its file is on a volume mounted at `/data` (`KEEPER_DATA_DIR=/data`), so a redeploy keeps the record of which logins have claimed. The health check is `GET /health`, which also names the commit that is live.
 
 To deploy: push to `main`, then `pnpm ship`. It asks Railway to build the pushed commit and waits until the new build passes its health check (about a minute); if the build fails, the previous one keeps serving. It needs `RAILWAY_API_TOKEN`, `RAILWAY_SERVICE_ID` and `RAILWAY_ENVIRONMENT_ID`.
 
@@ -91,7 +93,7 @@ Run one keeper per vault. A second one with the same keys does no harm to the va
 | `src/labels.ts` | What is free and the shop's name, kept with the quote until its promo exists |
 | `src/pricing.ts` | The pricing math and the two limits, as pure functions |
 | `src/pricer.ts` | The pricing service: Gemini's ask, the vault's state, the signed quote |
-| `src/relayer.ts` | `registerClaim`, one claim per email |
+| `src/relayer.ts`, `src/circle.ts` | `registerClaim`, one claim per Circle user, and the question to Circle: whose login is this, and which wallets are theirs |
 | `src/keeper.ts` | The settlement loop |
 | `src/server.ts`, `src/main.ts` | The HTTP API and the process |
 | `src/gemini.ts`, `src/chain.ts`, `src/store.ts`, `src/config.ts` | Gemini's API, Arc and the quote's EIP-712 types, the JSON file, settings |

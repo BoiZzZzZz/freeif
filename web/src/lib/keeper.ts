@@ -203,7 +203,8 @@ export const keeper = {
   /** A signed quote, good for 90 seconds, for this merchant only. */
   quote: (req: PriceRequest & { merchant: string; item: string; business: string }) => call<Quoted>("/quote", req),
 
-  claim: (req: { promoId: string; customer: string; email: string }) => call<ClaimResult>("/claims", req),
+  /** Covers `customer` on a promo. `userToken` is the login: the keeper asks Circle whose it is. */
+  claim: (req: { promoId: string; customer: string; userToken: string }) => call<ClaimResult>("/claims", req),
 
   promo: (id: string, customer?: string | null, signal?: AbortSignal) =>
     call<Promo>(`/promos/${encodeURIComponent(id)}${customer ? `?customer=${customer}` : ""}`, undefined, signal),

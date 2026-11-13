@@ -18,11 +18,16 @@ import { coveredState, takingCustomers } from "@/lib/promo";
 import { useNow } from "@/lib/use-now";
 import { useWallet, type Session } from "@/lib/wallet";
 
+// The keeper's answers when the login is no good: Circle does not know the token (it lasts an hour),
+// or the account in this browser is not that login's.
+const LOGIN_AGAIN = new Set(["login", "not-your-wallet"]);
+
 function refusal(err: unknown, promo: Promo | null): string {
   if (err instanceof KeeperError) {
     if (err.code === "full") return `All ${promo?.maxClaims ?? ""} spots are taken.`.replace("  ", " ");
     if (err.code === "closed") return "This promo has stopped accepting customers.";
-    if (err.code === "email-used") return "This email is already covered on this promo.";
+    if (err.code === "already-claimed") return "This email is already covered on this promo.";
+    if (LOGIN_AGAIN.has(err.code)) return "Your login ran out. Enter your email again to get covered.";
     return err.message;
   }
   return "Something went wrong. Try again in a moment.";
@@ -66,10 +71,13 @@ export function ClaimView({ promoId }: { promoId: string }) {
     setSaving(true);
     setError(null);
     try {
-      await keeper.claim({ promoId, customer: session.address, email: session.email });
+      // The login token goes with the claim: the keeper asks Circle whose it is before it covers anyone.
+      await keeper.claim({ promoId, customer: session.address, userToken: session.userToken });
       saveLocal(KEYS.claims, { ...readLocal<Record<string, string>>(KEYS.claims, NO_CLAIMS), [promoId]: session.address });
       setPromo(await keeper.promo(promoId, session.address));
     } catch (err) {
+      // A login the keeper refuses is forgotten, so the email field is there again.
+      if (err instanceof KeeperError && LOGIN_AGAIN.has(err.code)) wallet.logout();
       setError(refusal(err, promo));
     } finally {
       setSaving(false);

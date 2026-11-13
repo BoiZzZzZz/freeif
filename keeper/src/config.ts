@@ -47,6 +47,11 @@ export const pricerKey = (): Hex => env("PRICER_PK") as Hex;
 export const oracleKey = (): Hex => env("ORACLE_PK") as Hex;
 export const relayerKey = (): Hex => env("RELAYER_PK") as Hex;
 
+/** Circle's API key: the relayer asks Circle whose login a claim carries. */
+export const circleApiKey = (): string => env("CIRCLE_API_KEY");
+/** Lets the test loop register customers that have no login. Leave it unset to turn that off. */
+export const claimTestKey = (): string | undefined => optional("CLAIM_TEST_KEY");
+
 /** Pricing settings (SPEC section 2). All of them can be changed without a deploy. */
 export function pricingParams(): PricingParams {
   return {

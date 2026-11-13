@@ -1,6 +1,7 @@
 // The test loop: one promo on a 5-minute BTC market, from quote to payout, against a running keeper.
 // This script plays the merchant and the customers. The keeper prices, relays the claims, settles,
-// finalizes and pays. Needs TEST_MERCHANT_PK and TEST_CUSTOMER_ADDRESSES, and a funded vault.
+// finalizes and pays. Needs TEST_MERCHANT_PK, TEST_CUSTOMER_ADDRESSES and CLAIM_TEST_KEY (the key the
+// keeper runs with: the test customers are plain keys with no login), and a funded vault.
 //
 //   node scripts/e2e.ts [--series BTC05M] [--payout 1] [--customers 3] [--pick next|likely] [--approve]
 //
@@ -28,6 +29,7 @@ const usdc = config.usdcAddress();
 const client = makePublicClient();
 const merchant = makeWalletClient(config.env("TEST_MERCHANT_PK") as Hex);
 const customers = config.env("TEST_CUSTOMER_ADDRESSES").split(",").slice(0, Number(args.customers)) as Address[];
+const testKey = config.env("CLAIM_TEST_KEY");
 const payoutPerClaim = parseUnits(args.payout, 6);
 
 const usd = (amount: bigint | string) => `$${formatUnits(BigInt(amount), 6)}`;
@@ -35,16 +37,16 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const now = () => Math.floor(Date.now() / 1000);
 const step = (text: string) => console.log(`\n== ${text}`);
 
-async function api<T>(path: string, body?: unknown): Promise<{ status: number; body: T }> {
+async function api<T>(path: string, body?: unknown, headers: Record<string, string> = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${keeperUrl}${path}`, {
     method: body === undefined ? "GET" : "POST",
-    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    headers: body === undefined ? undefined : { "content-type": "application/json", ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return { status: res.status, body: (await res.json()) as T };
 }
-async function ok<T>(path: string, body?: unknown): Promise<T> {
-  const res = await api<T>(path, body);
+async function ok<T>(path: string, body?: unknown, headers?: Record<string, string>): Promise<T> {
+  const res = await api<T>(path, body, headers);
   if (res.status !== 200) throw new Error(`${path} answered ${res.status}: ${JSON.stringify(res.body)}`);
   return res.body;
 }
@@ -148,18 +150,35 @@ console.log(`promo ${promoId} created ${explorerTx(createHash)}`);
 
 step("Customers claim through the relayer");
 const before = await Promise.all(customers.map((c) => client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [c] })));
-const email = (i: number) => `customer${i + 1}.promo${promoId}@example.com`;
+// A real customer's claim carries a Circle login. These customers have none, so first three claims that
+// must be refused: no login, a login Circle does not know, and a test name with the wrong key.
+type Refused = { error: { code: string } };
+const claimFor = (i: number) => ({ promoId: promoId.toString(), customer: customers[i], testUser: `customer${i + 1}.promo${promoId}` });
+const withKey = { "x-test-key": testKey };
+const bare = { promoId: promoId.toString(), customer: customers[0] };
+const noLogin = await api<Refused>("/claims", bare);
+if (noLogin.status !== 400) throw new Error(`A claim with no login was not refused: ${JSON.stringify(noLogin)}`);
+const badLogin = await api<Refused>("/claims", { ...bare, userToken: "not.a.login" });
+if (badLogin.status !== 401 || badLogin.body.error.code !== "login") {
+  throw new Error(`A claim with a login Circle does not know should answer 401 "login": ${JSON.stringify(badLogin)}`);
+}
+const wrongKey = await api<Refused>("/claims", claimFor(0), { "x-test-key": "wrong" });
+if (wrongKey.status !== 401) throw new Error(`A test claim with the wrong key was not refused: ${JSON.stringify(wrongKey)}`);
+const untouched = await client.readContract({ address: vault, abi: promoVaultAbi, functionName: "getPromo", args: [promoId] });
+if (untouched.claimCount !== 0) throw new Error("A refused claim was registered");
+console.log("refused: a claim with no login, one with a login Circle does not know, and a test claim with the wrong key");
+
 for (const [i, customer] of customers.entries()) {
-  const claim = await ok<ClaimBody>("/claims", { promoId: promoId.toString(), customer, email: email(i) });
+  const claim = await ok<ClaimBody>("/claims", claimFor(i), withKey);
   console.log(`${customer} is customer ${claim.claimCount} ${claim.txHash ? explorerTx(claim.txHash) : ""}`);
 }
-const again = await ok<ClaimBody>("/claims", { promoId: promoId.toString(), customer: customers[0], email: email(0) });
+const again = await ok<ClaimBody>("/claims", claimFor(0), withKey);
 if (!again.alreadyRegistered) throw new Error("A repeated claim was registered twice");
 if (customers.length > 1) {
-  const reused = await api<{ error: { code: string } }>("/claims", { promoId: promoId.toString(), customer: customers[1], email: email(0) });
-  if (reused.status !== 409) throw new Error(`An email was used for a second wallet: ${JSON.stringify(reused)}`);
+  const reused = await api<Refused>("/claims", { ...claimFor(0), customer: customers[1] }, withKey);
+  if (reused.status !== 409) throw new Error(`One user claimed for a second wallet: ${JSON.stringify(reused)}`);
 }
-console.log("a repeated claim sends nothing, and one email cannot claim for two wallets");
+console.log("a repeated claim sends nothing, and one user cannot claim for two wallets");
 
 step("Wait for the keeper: settle, finalize, pay");
 const disputeWindow = await client.readContract({ address: vault, abi: promoVaultAbi, functionName: "disputeWindow" });

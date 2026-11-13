@@ -15,7 +15,7 @@ Merchant and customer screens never say prediction market, USDC, wallet or gas. 
 
 ## How it talks to the rest
 
-- **The keeper** (`../keeper`, API in its README) is called from the browser: the game list, the live price, the signed quote, the claim, and the promo's status. Names such as "the Lions win" come from the keeper, built from Gemini's data.
+- **The keeper** (`../keeper`, API in its README) is called from the browser: the game list, the live price, the signed quote, the claim (with the customer's login token, which the keeper checks with Circle), and the promo's status. Names such as "the Lions win" come from the keeper, built from Gemini's data.
 - **Circle** is called from this app's server, because those calls need the API key. Everything a user does is a "challenge": a route under `/api/wallet` asks Circle for one with the user's token, and Circle's SDK in the browser shows its own window for it.
 
 | Route | What it does |
@@ -72,7 +72,7 @@ On Vercel the two Circle values are project variables. On a developer machine th
 ## Known limits
 
 - The `/api/wallet` routes have no rate limit, and `email-token` sends an email to any address it is given.
-- The claim page sends the customer's email to the keeper, which trusts it. The check against Circle's login token is the next step.
+- The claim page sends the customer's login token to the keeper with the claim, and the keeper asks Circle whose it is: one claim per login per promo, for that login's own account. The token is a credential for an hour; it goes to the keeper over HTTPS and is not stored there.
 - Buttons, inputs and the bottom sheet are written by hand, not taken from a component library. The sheet does not trap focus on purpose: Circle's window is an iframe on the page and has to sit above it.
 - A login lasts one hour (Circle's user token). After that the app asks for the email again.
 - Cash out shows the balance and says it is coming; it does not send money yet.

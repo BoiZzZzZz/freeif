@@ -1,5 +1,6 @@
 // The keeper's HTTP API: prices and signed quotes for the merchant form, claims for the customer page.
 // Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seconds.
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { createPublicClient, http, isAddress, type Address } from "viem";
@@ -21,9 +22,25 @@ type Deps = {
   relayer: Relayer;
   oracle: Address;
   store: Store;
+  /** The test loop's key for claims with no login. Undefined turns that way in off. */
+  testKey?: string;
 };
 
 class BadRequest extends Error {}
+
+const CLAIM_STATUS: Partial<Record<ClaimRefusal["code"], 401 | 403 | 409 | 502>> = {
+  login: 401,
+  "not-your-wallet": 403,
+  "already-claimed": 409,
+  failed: 502,
+};
+
+/** Compares two secrets without giving away, by the time it takes, how much of a guess was right. */
+function sameSecret(given: string | undefined, secret: string): boolean {
+  if (given === undefined) return false;
+  const hash = (text: string) => createHash("sha256").update(text).digest();
+  return timingSafeEqual(hash(given), hash(secret));
+}
 
 function parsePriceRequest(input: Record<string, unknown>): PriceRequest {
   const text = (name: string): string => {
@@ -62,8 +79,7 @@ export function makeApp(d: Deps): Hono {
       return c.json({ error: { code: err.code, message: err.message, maxCustomers: err.maxCustomers } }, 422);
     }
     if (err instanceof ClaimRefusal) {
-      const status = err.code === "email-used" ? 409 : err.code === "failed" ? 502 : 422;
-      return c.json({ error: { code: err.code, message: err.message } }, status);
+      return c.json({ error: { code: err.code, message: err.message } }, CLAIM_STATUS[err.code] ?? 422);
     }
     if (err instanceof BadRequest || err instanceof SyntaxError) {
       return c.json({ error: { code: "bad-request", message: err.message } }, 400);
@@ -128,14 +144,26 @@ export function makeApp(d: Deps): Hono {
     return c.json({ leagues, ...(await d.games.list(league)) });
   });
 
-  // Registers a customer on a promo. One claim per email per promo.
+  // Registers a customer on a promo. `userToken` is the customer's Circle login: the relayer asks Circle
+  // whose it is. One claim per Circle user per promo, for an address that is one of that user's wallets.
   app.post("/claims", async (c) => {
     const body = (await c.req.json()) as Record<string, unknown>;
     if (!/^\d+$/.test(String(body.promoId))) throw new BadRequest("promoId must be a whole number");
-    if (typeof body.customer !== "string" || typeof body.email !== "string") {
-      throw new BadRequest("customer and email are required");
+    if (typeof body.customer !== "string") throw new BadRequest("customer is required");
+    const promoId = BigInt(String(body.promoId));
+
+    // The test loop's customers are plain keys with no login. With the test key in the `X-Test-Key`
+    // header it names them itself (`testUser`). With no key set on the keeper this way in does not exist.
+    if (body.testUser !== undefined) {
+      if (d.testKey === undefined || !sameSecret(c.req.header("x-test-key"), d.testKey)) {
+        throw new ClaimRefusal("login", "Please log in again.");
+      }
+      if (typeof body.testUser !== "string" || body.testUser === "") throw new BadRequest("testUser must be a name");
+      return c.json(await d.relayer.registerTestClaim(promoId, body.customer, body.testUser));
     }
-    return c.json(await d.relayer.registerClaim(BigInt(String(body.promoId)), body.customer, body.email));
+
+    if (typeof body.userToken !== "string" || body.userToken === "") throw new BadRequest("userToken is required");
+    return c.json(await d.relayer.registerClaim(promoId, body.customer, body.userToken));
   });
 
   // A promo as the chain has it, with the plain names behind its two hashes, what the merchant said is
