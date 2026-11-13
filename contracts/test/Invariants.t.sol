@@ -115,8 +115,8 @@ contract VaultHandler is Test {
         amount = bound(amount, 1_001, 5_000 * USDC);
         uint256 total = vault.totalShares();
         if (total != 0) {
-            uint256 free = vault.freeBalance();
-            if (free == 0 || amount * total / free == 0) return;
+            uint256 basis = vault.depositBalance();
+            if (basis == 0 || amount * total / basis == 0) return;
         }
         address lp = lps[lpSeed % lps.length];
 
@@ -671,12 +671,14 @@ contract PromoVaultInvariantTest is Test {
         assertGe(usdc.balanceOf(address(vault)), locked, "balance below locked collateral");
 
         uint256 sumOfLocks;
+        uint256 sumOfPending;
         uint256 sumOfUnpaid;
         uint256 sumOfOwed;
         uint256 n = vault.promoCount();
         for (uint256 promoId = 0; promoId < n; promoId++) {
             PromoVault.Promo memory p = vault.getPromo(promoId);
             sumOfLocks += p.collateralLocked;
+            if (_pending(p)) sumOfPending += p.collateralLocked;
             assertEq(p.collateralLocked, _unpaidMaxPayout(p), "a promo's lock is not its unpaid max payout");
             sumOfUnpaid += _unpaidMaxPayout(p);
             sumOfOwed += _owed(promoId, p);
@@ -684,6 +686,53 @@ contract PromoVaultInvariantTest is Test {
         assertEq(vault.totalOwedPayouts(), sumOfOwed, "totalOwedPayouts is not the sum of owed payouts");
         assertEq(locked, sumOfLocks + sumOfOwed, "lockedCollateral is not the promo locks plus owed");
         assertEq(locked, sumOfUnpaid + sumOfOwed, "lockedCollateral is not unpaid max payouts plus owed");
+        assertEq(
+            vault.pendingCollateral(),
+            sumOfPending,
+            "pendingCollateral is not the locks of the pending promos"
+        );
+    }
+
+    /// From any reachable state: a stranger deposits, every promo without a final result then
+    /// gets one, and the stranger withdraws. They never leave with more than they brought, so a
+    /// deposit cannot buy into a lock for less than it is worth. The results posted here are all
+    /// "no", the best case for whoever holds shares; promos already settled keep their result.
+    function invariant_aDepositNeverLeavesWithMoreThanItBrought() public {
+        uint256 snapshot = vm.snapshotState();
+        if (vault.paused()) vault.unpause();
+
+        address stranger = makeAddr("stranger");
+        uint256 amount = 1_000_000e6;
+        usdc.mint(stranger, amount);
+        vm.startPrank(stranger);
+        usdc.approve(address(vault), amount);
+        uint256 minted = vault.deposit(amount);
+        vm.stopPrank();
+
+        uint256 n = vault.promoCount();
+        uint256 latestDeadline = block.timestamp;
+        for (uint256 promoId = 0; promoId < n; promoId++) {
+            PromoVault.Promo memory p = vault.getPromo(promoId);
+            if (p.status == PromoVault.Status.Vetoed) vault.resetSettlement(promoId);
+            if (p.claimDeadline > latestDeadline) latestDeadline = p.claimDeadline;
+        }
+        vm.warp(latestDeadline);
+        for (uint256 promoId = 0; promoId < n; promoId++) {
+            if (vault.getPromo(promoId).status != PromoVault.Status.Open) continue;
+            vm.prank(oracle);
+            vault.settle(promoId, false, "362998", "no");
+        }
+        vm.warp(block.timestamp + vault.disputeWindow());
+        for (uint256 promoId = 0; promoId < n; promoId++) {
+            if (vault.getPromo(promoId).status == PromoVault.Status.Settled) vault.finalize(promoId);
+        }
+        assertEq(vault.pendingCollateral(), 0, "collateral still pending after every promo ended");
+
+        vm.prank(stranger);
+        uint256 out = vault.withdraw(minted);
+        assertLe(out, amount, "a deposit left with more than it brought");
+
+        vm.revertToState(snapshot);
     }
 
     /// Every base unit is accounted for: nothing leaves the vault except withdrawals, payouts and
@@ -826,6 +875,12 @@ contract PromoVaultInvariantTest is Test {
             assertEq(owed, p.payoutPerClaim, "owed something other than payoutPerClaim");
             sum += owed;
         }
+    }
+
+    /// @dev No final result yet.
+    function _pending(PromoVault.Promo memory p) internal pure returns (bool) {
+        return p.status == PromoVault.Status.Open || p.status == PromoVault.Status.Settled
+            || p.status == PromoVault.Status.Vetoed;
     }
 
     /// @dev SPEC: the sum runs over every promo that is not finalized-no, paid out or voided.

@@ -92,6 +92,11 @@ contract PromoVault is EIP712 {
     ///         totalOwedPayouts.
     uint256 public lockedCollateral;
 
+    /// @notice The part of lockedCollateral held by promos with no final result yet (Open, Settled
+    ///         or Vetoed): each one's full maximum payout. A deposit is priced as if all of it
+    ///         comes back to the LPs.
+    uint256 public pendingCollateral;
+
     /// @notice Payouts whose transfer failed in payoutBatch, by promo and customer. Each stays
     ///         inside lockedCollateral until retryPayout sends it.
     mapping(uint256 => mapping(address => uint256)) public owedPayout;
@@ -241,7 +246,18 @@ contract PromoVault is EIP712 {
         return usdc.balanceOf(address(this)) - lockedCollateral;
     }
 
-    /// @notice Deposit USDC and receive shares of the free balance.
+    /// @notice What a deposit is priced on: the free balance plus pendingCollateral.
+    /// @dev This is the most the LPs' shares can be worth, reached if every promo without a final
+    ///      result ends "no". Pricing a deposit on the free balance alone would value those locks
+    ///      at nothing until they are released, and money arriving just before a release would
+    ///      take the lock from the LPs whose capital is inside it. A depositor pays for the locks
+    ///      in full, so the best they can do out of a promo that was already open is break even.
+    ///      Withdrawals are still priced on freeBalance(), the least the shares can be worth.
+    function depositBalance() public view returns (uint256) {
+        return freeBalance() + pendingCollateral;
+    }
+
+    /// @notice Deposit USDC and receive shares, priced on depositBalance().
     /// @param amount USDC base units. The caller must have approved the vault for it.
     /// @return sharesMinted Shares credited to the caller.
     function deposit(uint256 amount) external whenNotPaused returns (uint256 sharesMinted) {
@@ -255,10 +271,11 @@ contract PromoVault is EIP712 {
             totalShares = DEAD_SHARES;
         } else {
             // Priced before the transfer arrives. Rounds down, in favor of existing LPs.
-            // With nothing free (every unit is locked behind promos) a share has no price.
-            uint256 free = freeBalance();
-            if (free == 0) revert NoFreeBalance();
-            sharesMinted = amount * totalShares / free;
+            // With nothing free and nothing pending (the LPs' money is all lost) a share has no
+            // price.
+            uint256 basis = depositBalance();
+            if (basis == 0) revert NoFreeBalance();
+            sharesMinted = amount * totalShares / basis;
             if (sharesMinted == 0) revert ZeroShares();
         }
 
@@ -352,6 +369,7 @@ contract PromoVault is EIP712 {
 
         usedQuoteNonce[q.nonce] = true;
         lockedCollateral += maxPayout;
+        pendingCollateral += maxPayout;
 
         promoId = promos.length;
         Promo storage p = promos.push();
@@ -464,6 +482,10 @@ contract PromoVault is EIP712 {
         uint256 windowEnd = _disputeWindowEnd(p);
         if (block.timestamp < windowEnd) revert DisputeWindowOpen(windowEnd);
 
+        // The result is final, so the whole lock stops being pending: part of it is released
+        // below, and on a "yes" the rest is owed to customers.
+        pendingCollateral -= p.collateralLocked;
+
         bool outcomeYes = p.outcomeYes;
         uint256 released;
         if (outcomeYes) {
@@ -493,6 +515,7 @@ contract PromoVault is EIP712 {
         address promoMerchant = p.merchant;
         uint256 refund = p.premiumPaid;
         lockedCollateral -= p.collateralLocked;
+        pendingCollateral -= p.collateralLocked;
         p.collateralLocked = 0;
         p.status = Status.Voided;
 

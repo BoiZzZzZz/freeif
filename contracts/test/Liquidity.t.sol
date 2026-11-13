@@ -85,17 +85,29 @@ contract DepositTest is VaultTest {
         assertEq(minted, 100 * USDC);
     }
 
-    function test_deposit_isPricedOnFreeBalanceOnly() public {
+    function test_deposit_whilePromoOpen_isPricedOnTheLockAsWell() public {
         _deposit(alice, 1_000 * USDC);
         vault.setMaxExposureBps(10_000); // this test is about share pricing, not the exposure cap
         // A promo pays 390 in premium and locks 1,000. Free balance: 1,390 - 1,000 = 390.
         _openPromo(390 * USDC, 1_000 * USDC);
         assertEq(vault.freeBalance(), 390 * USDC);
+        assertEq(vault.depositBalance(), 1_390 * USDC);
 
-        // 390 buys as many shares as already exist, because it doubles the free balance.
-        uint256 minted = _deposit(bob, 390 * USDC);
+        // It takes 1,390, not 390, to buy as many shares as already exist.
+        uint256 minted = _deposit(bob, 1_390 * USDC);
 
         assertEq(minted, 1_000 * USDC);
+    }
+
+    function test_deposit_whenEverythingIsLocked_isPricedOnTheLock() public {
+        _deposit(alice, 1_000 * USDC);
+        vault.setMaxExposureBps(10_000);
+        _openPromo(0, 1_000 * USDC); // no premium, and the whole vault is locked
+        assertEq(vault.freeBalance(), 0);
+
+        uint256 minted = _deposit(bob, 10 * USDC);
+
+        assertEq(minted, 10 * USDC);
     }
 
     function test_deposit_revertsWhenItWouldMintNothing() public {
@@ -110,12 +122,16 @@ contract DepositTest is VaultTest {
         vm.stopPrank();
     }
 
-    /// Only reachable with the exposure cap at 100%: one promo locks every free unit.
-    function test_deposit_revertsWhenNothingIsFree() public {
+    /// Only reachable with the exposure cap at 100%: one promo locks every free unit, and then
+    /// pays all of it out. The shares that exist are worth nothing, so a new share has no price.
+    function test_deposit_revertsWhenNothingIsFreeOrPending() public {
         _deposit(alice, 1_000 * USDC);
         vault.setMaxExposureBps(10_000);
-        _openPromo(0, 1_000 * USDC);
-        assertEq(vault.freeBalance(), 0);
+        uint256 promoId = _openPromo(0, 1_000 * USDC);
+        _claimMany(promoId, 50);
+        _settleAndFinalize(promoId, true);
+        vault.payoutBatch(promoId, 50);
+        assertEq(vault.depositBalance(), 0);
 
         usdc.mint(bob, 10 * USDC);
         vm.startPrank(bob);
@@ -304,6 +320,198 @@ contract LockedCollateralTest is VaultTest {
         _deposit(alice, aliceIn);
         uint256 bobShares = _deposit(bob, bobIn);
 
+        vm.prank(bob);
+        uint256 out = vault.withdraw(bobShares);
+
+        assertLe(out, bobIn);
+    }
+}
+
+/// pendingCollateral is the locks of the promos that have no final result yet.
+contract PendingCollateralTest is VaultTest {
+    uint256 internal first;
+    uint256 internal second;
+
+    function setUp() public override {
+        super.setUp();
+        _deposit(alice, 10_000 * USDC);
+        first = _openPromo(390 * USDC, 1_000 * USDC);
+        second = _openPromo(100 * USDC, 500 * USDC);
+    }
+
+    function test_pendingCollateral_isZeroBeforeAnyPromo() public {
+        PromoVault empty = new PromoVault(usdc, pricer, oracle);
+        assertEq(empty.pendingCollateral(), 0);
+        assertEq(empty.depositBalance(), 0);
+    }
+
+    function test_createPromo_addsTheFullPayoutToPending() public view {
+        assertEq(vault.pendingCollateral(), 1_500 * USDC);
+        assertEq(vault.lockedCollateral(), 1_500 * USDC);
+        assertEq(vault.depositBalance(), 10_490 * USDC, "the deposits and both premiums");
+    }
+
+    function test_createPromoWithPermit_addsTheFullPayoutToPending() public {
+        _createWithPermit(_quote(10 * USDC, 20, 50 * USDC));
+        assertEq(vault.pendingCollateral(), 1_700 * USDC);
+    }
+
+    function test_settleVetoAndReset_leaveThePromoPending() public {
+        _settle(first, true);
+        assertEq(vault.pendingCollateral(), 1_500 * USDC);
+        vault.veto(first);
+        assertEq(vault.pendingCollateral(), 1_500 * USDC);
+        vault.resetSettlement(first);
+        assertEq(vault.pendingCollateral(), 1_500 * USDC);
+    }
+
+    function test_finalizeNo_takesThePromoOutOfPending() public {
+        _settleAndFinalize(first, false);
+        assertEq(vault.pendingCollateral(), 500 * USDC);
+        assertEq(vault.depositBalance(), 10_490 * USDC, "the lock became free balance");
+    }
+
+    /// A "yes" takes the whole lock out of pending, the claimed part included: that part is now
+    /// owed to customers, and a deposit must not be priced as if the LPs still had it.
+    function test_finalizeYes_takesTheWholeLockOutOfPending() public {
+        _claimMany(first, 20);
+        _settleAndFinalize(first, true);
+        assertEq(vault.pendingCollateral(), 500 * USDC);
+        assertEq(vault.lockedCollateral(), 500 * USDC + 20 * 20 * USDC);
+        assertEq(vault.depositBalance(), 10_490 * USDC - 400 * USDC, "less what the customers are owed");
+
+        vault.payoutBatch(first, 20);
+        assertEq(vault.pendingCollateral(), 500 * USDC, "a payout does not touch pending");
+        assertEq(vault.depositBalance(), 10_090 * USDC);
+    }
+
+    function test_voidPromo_takesThePromoOutOfPending() public {
+        vm.warp(uint256(vault.getPromo(first).marketCloseTime) + vault.voidGrace() + 1);
+        vault.voidPromo(first);
+        assertEq(vault.pendingCollateral(), 500 * USDC);
+        assertEq(vault.depositBalance(), 10_100 * USDC, "the premium went back to the merchant");
+    }
+}
+
+/// A deposit is priced on the free balance plus the locks of promos that have no final result
+/// yet. If it were priced on the free balance alone, a lock would be worth nothing until it is
+/// released, and money that arrived just before the release would take it from the LPs whose
+/// capital was inside it (review finding, Nov 12).
+contract DepositWhilePromoPendingTest is VaultTest {
+    uint256 internal constant LIQUIDITY = 11_810 * USDC;
+    uint256 internal constant PAYOUT = 400 * USDC;
+    uint32 internal constant MAX_CLAIMS = 10;
+    uint256 internal constant MAX_PAYOUT = 4_000 * USDC;
+    uint256 internal constant PREMIUM = 1_638 * USDC;
+
+    address internal stranger = makeAddr("stranger");
+    uint256 internal promoId;
+    uint256 internal aliceShares;
+
+    function setUp() public override {
+        super.setUp();
+        aliceShares = _deposit(alice, LIQUIDITY);
+        promoId = _createPromo(PAYOUT, MAX_CLAIMS, PREMIUM);
+        assertEq(vault.freeBalance(), 9_448 * USDC);
+    }
+
+    /// The result is "no" and the dispute window is over. A stranger deposits, calls finalize and
+    /// withdraws, all in one transaction. The 4,000 the promo releases must stay with Alice.
+    function test_deposit_rightBeforeFinalize_takesNothingFromTheReleasedLock() public {
+        _settle(promoId, false);
+        vm.warp(block.timestamp + vault.disputeWindow());
+
+        uint256 loan = 1_000_000 * USDC;
+        uint256 minted = _deposit(stranger, loan);
+        vault.finalize(promoId);
+        vm.prank(stranger);
+        uint256 out = vault.withdraw(minted);
+
+        assertLe(out, loan, "the stranger left with more than they brought");
+
+        vm.prank(alice);
+        uint256 aliceOut = vault.withdraw(aliceShares);
+        // The only LP, after a "no": her 11,810 plus the 1,638 premium, less the dead shares' dust.
+        assertApproxEqAbs(aliceOut, LIQUIDITY + PREMIUM, 10_000);
+    }
+
+    /// Bob deposits while the promo is open and the result is "no": he gets his deposit back and
+    /// no part of a lock that was Alice's capital and Alice's premium.
+    function test_deposit_whilePromoOpen_onANo_returnsTheDepositAndNoMore() public {
+        uint256 bobIn = 9_448 * USDC;
+        uint256 bobShares = _deposit(bob, bobIn);
+
+        _settleAndFinalize(promoId, false);
+        vm.prank(bob);
+        uint256 bobOut = vault.withdraw(bobShares);
+        vm.prank(alice);
+        uint256 aliceOut = vault.withdraw(aliceShares);
+
+        assertLe(bobOut, bobIn);
+        assertApproxEqAbs(bobOut, bobIn, 10);
+        assertApproxEqAbs(aliceOut, LIQUIDITY + PREMIUM, 10_000);
+    }
+
+    /// The same deposit when the result is "yes" and every claim is taken: Bob bought into the
+    /// lock, so he carries his part of the loss. Alice does not carry all of it.
+    function test_deposit_whilePromoOpen_onAYes_sharesTheLoss() public {
+        uint256 bobIn = 9_448 * USDC;
+        uint256 bobShares = _deposit(bob, bobIn);
+
+        _claimMany(promoId, MAX_CLAIMS);
+        _settleAndFinalize(promoId, true);
+        vault.payoutBatch(promoId, MAX_CLAIMS);
+        vm.prank(bob);
+        uint256 bobOut = vault.withdraw(bobShares);
+        vm.prank(alice);
+        uint256 aliceOut = vault.withdraw(aliceShares);
+
+        // Bob paid 9,448 into a vault valued at 13,448 (9,448 free and the 4,000 lock), so he
+        // holds 9,448 / 22,896 of what is left: 11,810 + 1,638 + 9,448 - 4,000 = 18,896.
+        uint256 left = LIQUIDITY + PREMIUM + bobIn - MAX_PAYOUT;
+        assertApproxEqAbs(bobOut, left * bobIn / (LIQUIDITY + PREMIUM + bobIn), 10_000);
+        assertLt(bobOut, bobIn, "bob took no part of the loss");
+        assertGt(aliceOut, LIQUIDITY + PREMIUM - MAX_PAYOUT, "alice carried the whole loss");
+    }
+
+    /// The only LP leaves while the promo is open, and gives up her part of the lock. Money that
+    /// arrives afterwards cannot pick the lock up for next to nothing.
+    function test_deposit_afterEveryLpLeft_cannotTakeTheLock() public {
+        vm.prank(alice);
+        vault.withdraw(aliceShares);
+        assertEq(vault.totalShares(), vault.DEAD_SHARES());
+
+        uint256 strangerIn = 100 * USDC;
+        uint256 minted = _deposit(stranger, strangerIn);
+        _settleAndFinalize(promoId, false);
+        vm.prank(stranger);
+        uint256 out = vault.withdraw(minted);
+
+        assertLe(out, strangerIn, "100 USDC bought the 4,000 lock");
+    }
+
+    /// Whenever a deposit arrives in the life of a promo, and whatever the result, withdrawing
+    /// it after the promo has ended never returns more than was deposited.
+    function testFuzz_deposit_atAnyPointOfAPromo_neverReturnsMoreThanDeposited(
+        uint256 bobIn,
+        uint256 stage,
+        uint256 claims,
+        bool outcomeYes
+    ) public {
+        bobIn = bound(bobIn, 1 * USDC, 10_000_000 * USDC);
+        stage = bound(stage, 0, 2);
+        claims = bound(claims, 0, MAX_CLAIMS);
+        _claimMany(promoId, claims);
+
+        // 0: while the promo is open. 1: in the dispute window. 2: when finalize is due.
+        if (stage >= 1) _settle(promoId, outcomeYes);
+        if (stage == 2) vm.warp(block.timestamp + vault.disputeWindow());
+        uint256 bobShares = _deposit(bob, bobIn);
+        if (stage == 0) _settle(promoId, outcomeYes);
+        if (stage <= 1) vm.warp(block.timestamp + vault.disputeWindow());
+
+        vault.finalize(promoId);
+        if (outcomeYes && claims != 0) vault.payoutBatch(promoId, MAX_CLAIMS);
         vm.prank(bob);
         uint256 out = vault.withdraw(bobShares);
 
