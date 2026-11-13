@@ -4,7 +4,7 @@
 //
 //   node scripts/e2e.ts [--series BTC05M] [--payout 1] [--customers 3] [--pick next|likely] [--approve]
 //
-// --pick likely takes the running window with the highest price, which makes a payout more likely.
+// --pick likely takes the running window when Gemini prices it at 60% or more, which makes a payout more likely.
 // --approve uses approve + createPromo; the default is one transaction, createPromoWithPermit.
 import { parseArgs } from "node:util";
 import { erc20Abi, formatUnits, hashTypedData, parseEventLogs, parseSignature, parseUnits, type Address, type Hex } from "viem";
@@ -69,12 +69,12 @@ if (health.vault.toLowerCase() !== vault.toLowerCase()) throw new Error(`The kee
 step("Pick a window");
 const { windows } = await ok<{ windows: Window[] }>(`/intervals?series=${args.series}`);
 // Leave a minute to create the promo and register the customers before claims close (60s before the close).
-const usable = windows.filter((w) => w.quotable && w.closeTime - now() >= 120);
+// A window about to start can show an empty book (ask 0.99), which the keeper refuses as too likely.
+const usable = windows.filter((w) => w.quotable && w.closeTime - now() >= 120 && Number(w.bestAsk) <= 0.9);
 if (usable.length === 0) throw new Error("No window is quotable right now");
+// "likely": the soonest window priced between 60% and 90%, which is only ever the one that is running.
 const chosen =
-  args.pick === "likely"
-    ? usable.filter((w) => Number(w.bestAsk) <= 0.9).sort((a, b) => Number(b.bestAsk) - Number(a.bestAsk))[0] ?? usable[0]!
-    : usable[0]!;
+  (args.pick === "likely" ? usable.find((w) => Number(w.bestAsk) >= 0.6 && Number(w.bestAsk) <= 0.9) : undefined) ?? usable[0]!;
 console.log(`${chosen.eventTicker} "${chosen.eventTitle}", ask ${chosen.bestAsk}, closes in ${chosen.closeTime - now()}s`);
 
 step("Price, then a signed quote");
@@ -194,13 +194,19 @@ for (const l of logs) {
 const after = await Promise.all(customers.map((c) => client.readContract({ address: usdc, abi: erc20Abi, functionName: "balanceOf", args: [c] })));
 const received = after.map((a, i) => a - before[i]!);
 
-const paid = logs.filter((l) => l.eventName === "Paid").length;
+// Judged from this promo's own Paid events. The balances are a second check, and only a lower bound:
+// another promo may pay the same test customers while this one runs.
+const paidLogs = logs.filter((l) => l.eventName === "Paid");
+const paid = paidLogs.length;
 if (promo.outcomeYes) {
-  if (paid !== customers.length || received.some((r) => r !== payoutPerClaim)) {
+  const eachPaidOnce = customers.every(
+    (c) => paidLogs.filter((l) => l.args.customer.toLowerCase() === c.toLowerCase() && l.args.amount === payoutPerClaim).length === 1,
+  );
+  if (paid !== customers.length || !eachPaidOnce || received.some((r) => r < payoutPerClaim)) {
     throw new Error(`Result "yes" but ${paid} of ${customers.length} were paid; received ${received.map(usd).join(", ")}`);
   }
   console.log(`\nRESULT: yes. ${paid} customers were paid ${usd(payoutPerClaim)} each.`);
 } else {
-  if (paid !== 0 || received.some((r) => r !== 0n)) throw new Error(`Result "no" but a customer was paid`);
+  if (paid !== 0) throw new Error(`Result "no" but a customer was paid`);
   console.log(`\nRESULT: no. Nobody was paid; the ${usd(promo.premiumPaid)} premium stays with the vault. Run again for a "yes".`);
 }

@@ -2,10 +2,10 @@
 // Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seconds.
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { isAddress, type Address } from "viem";
+import { createPublicClient, http, isAddress, type Address } from "viem";
 import { promoVaultAbi } from "./abi.ts";
-import { CHAIN_ID } from "./config.ts";
-import { statusName, type PublicClient } from "./chain.ts";
+import { CHAIN_ID, rpcUrls } from "./config.ts";
+import { arcTestnet, statusName, type PublicClient } from "./chain.ts";
 import { getEvent, priceToBps, upcomingIntervalTickers } from "./gemini.ts";
 import { Pricer, Refusal, type PriceRequest } from "./pricer.ts";
 import { ClaimRefusal, Relayer } from "./relayer.ts";
@@ -80,6 +80,23 @@ export function makeApp(d: Deps): Hono {
       relayer: d.relayer.address,
       block: Number(block),
     });
+  });
+
+  // Each RPC endpoint on its own, in the order the keeper tries them. The URLs stay private.
+  app.get("/health/rpc", async (c) => {
+    const endpoints = await Promise.all(
+      rpcUrls().map(async (url, i) => {
+        const started = Date.now();
+        try {
+          const one = createPublicClient({ chain: arcTestnet, transport: http(url, { timeout: 8_000, retryCount: 0 }) });
+          const block = await one.getBlockNumber();
+          return { endpoint: i + 1, ok: true, block: Number(block), ms: Date.now() - started };
+        } catch {
+          return { endpoint: i + 1, ok: false, block: null, ms: Date.now() - started };
+        }
+      }),
+    );
+    return c.json({ ok: endpoints.some((e) => e.ok), endpoints });
   });
 
   // The price of a promo, unsigned. No merchant needed: the form shows it before login.

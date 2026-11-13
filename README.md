@@ -12,6 +12,14 @@ Built for the UBC Hackathon 2026 (DeFi track). Work in progress: this README gro
 | `keeper/` | Node service: pricing, settlement keeper, claim relayer, QuickNode Stream webhook |
 | `web/` | Next.js app for merchants, customers and liquidity providers |
 
+## What is live
+
+| | |
+|---|---|
+| Vault | [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d) on Arc testnet (chain 5042002), verified |
+| Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
+| First payout | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
+
 ## Run the contract tests
 
 ```
@@ -20,6 +28,16 @@ forge test
 ```
 
 Needs [Foundry](https://getfoundry.sh). Dependencies are git submodules: run `git submodule update --init` after cloning.
+
+## Run the keeper tests
+
+```
+cd keeper
+pnpm install
+pnpm test
+```
+
+Needs Node 24 and pnpm.
 
 ## License
 

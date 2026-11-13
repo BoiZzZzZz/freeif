@@ -39,6 +39,7 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 | Route | What it does |
 |---|---|
 | `GET /health` | The vault, the three service addresses, the latest block |
+| `GET /health/rpc` | Whether each RPC endpoint answers, and how fast |
 | `GET /price?eventTicker=&instrumentSymbol=&payoutPerClaim=&maxClaims=&claimDeadline=` | The price of a promo, unsigned. `breakdown` has `chance`, `mostOwed`, `fee` and `cost`; `maxCustomers` is the most the vault can cover right now; `limit` is `ok` or the limit the request is over |
 | `POST /quote` | Body: the same fields plus `merchant` (and `hedgeMode`). Returns the price plus `quote` and `signature` for `createPromo(quote, signature)`. Good for 90 seconds, for that merchant only. Answers 422 with a reason when the vault cannot take the promo |
 | `POST /claims` | Body: `promoId`, `customer`, `email`. Registers the customer on chain. 409 when the email has already claimed with another wallet |
@@ -64,6 +65,12 @@ pnpm e2e                           # another; add --pick likely to favor a "yes"
 ```
 
 It needs `TEST_MERCHANT_PK` and `TEST_CUSTOMER_ADDRESSES` in the environment, a merchant wallet with a few USDC, and a deposit in the vault.
+
+## Hosting
+
+The keeper runs on Railway at `https://freeif-production.up.railway.app`, built from `Dockerfile` with `keeper/` as the service's root folder, and redeployed on every push to `main`. Its file is on a volume mounted at `/data` (`KEEPER_DATA_DIR=/data`), so a redeploy keeps the record of which emails have claimed. The health check is `GET /health`.
+
+Run one keeper per vault. A second one with the same keys does no harm to the vault (every step is checked on chain first), but the two compete for transaction nonces. To test against the hosted keeper: `KEEPER_URL=https://freeif-production.up.railway.app pnpm e2e`.
 
 ## Layout
 
