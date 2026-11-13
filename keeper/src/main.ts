@@ -69,6 +69,9 @@ feed.subscribe((event) => {
   // A new promo: the price its quote was made on becomes the first point of its chart.
   if (event.event === "PromoCreated" && event.nonce && event.promoId !== null) odds.start(event.promoId, event.nonce, event.at);
 });
+// Claim cards: promos from this id on (covers excepted) are covered by cards the merchant prints.
+const cardsFrom = config.cardsFromPromo();
+console.log(cardsFrom === undefined ? "[cards] CARDS_FROM_PROMO is not set: no promo uses cards" : `[cards] promos from ${cardsFrom} on use cards`);
 const streamSecret = config.streamSecret();
 if (streamSecret === undefined) console.log("[feed] QUICKNODE_STREAM_SECRET is not set: POST /stream refuses every delivery");
 
@@ -85,6 +88,7 @@ const app = makeApp({
   feed,
   odds,
   testKey: config.claimTestKey(),
+  cardsFrom,
   streamSecret,
 });
 const server = serve({ fetch: app.fetch, port: config.port(), hostname: "0.0.0.0" }, (info) => {

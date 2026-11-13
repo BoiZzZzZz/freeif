@@ -8,7 +8,7 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { createPublicClient, erc20Abi, http, isAddress, type Address } from "viem";
+import { createPublicClient, erc20Abi, getAddress, http, isAddress, zeroAddress, type Address } from "viem";
 import { promoVaultAbi } from "./abi.ts";
 import { CHAIN_ID, rpcUrls } from "./config.ts";
 import { Status, arcTestnet, statusName, type PublicClient } from "./chain.ts";
@@ -40,11 +40,16 @@ type Deps = {
   odds?: Odds;
   /** The test loop's key for claims with no login. Undefined turns that way in off. */
   testKey?: string;
+  /**
+   * Claim cards: promos with this id or a higher one, covers excepted, are covered by cards the merchant
+   * prints, and `POST /claims` refuses them. Undefined: no promo uses cards (`CARDS_FROM_PROMO`).
+   */
+  cardsFrom?: bigint;
   /** The secret the QuickNode Stream sends with each delivery. Undefined refuses every delivery. */
   streamSecret?: string;
   /** How much one client may ask (limit.ts). Tests pass smaller numbers. */
   limits?: Limits;
-  /** The clock the limits are counted on (tests). */
+  /** The clock the limits, the shared promo reads and a card's deadline are counted on (tests). */
   now?: () => number;
 };
 
@@ -124,12 +129,23 @@ function eventStream(c: Context, feed: Feed, gate: Gate, wanted: (event: FeedEve
   });
 }
 
-const CLAIM_STATUS: Partial<Record<ClaimRefusal["code"], 401 | 403 | 409 | 502>> = {
+const CLAIM_STATUS: Partial<Record<ClaimRefusal["code"], 400 | 401 | 403 | 409 | 502>> = {
   login: 401,
   "not-your-wallet": 403,
+  "not-your-promo": 403,
   "already-claimed": 409,
+  "cards-only": 409,
+  "not-cards": 409,
+  "bad-card": 400,
   failed: 502,
 };
+
+/** Card addresses one request may carry. A page with more sends them in parts. */
+export const MAX_CARDS_PER_REQUEST = 500;
+
+/** A promo is covered by claim cards when the switch is on, its id is at or past it, and it is not a cover. */
+export const isCardPromo = (cardsFrom: bigint | undefined, promoId: bigint, hedgeMode: boolean): boolean =>
+  cardsFrom !== undefined && promoId >= cardsFrom && !hedgeMode;
 
 /** Compares two secrets without giving away, by the time it takes, how much of a guess was right. */
 function sameSecret(given: string | undefined, secret: string): boolean {
@@ -189,7 +205,9 @@ export function makeApp(d: Deps): Hono {
   // The limits come after CORS, so that a page can read a refusal. `/health` is left out because the web
   // app's own server asks it for the vault's address, and the webhook because it has its own proof.
   const limits = d.limits ?? LIMITS;
-  const limiter = new Limiter(d.now);
+  // The clock for the limits and for how long a read of the chain is shared (tests move it).
+  const clock = d.now ?? Date.now;
+  const limiter = new Limiter(clock);
   const streams = new Gate(limits.streams.perClient, limits.streams.inAll);
   app.use("*", async (c, next) => {
     const path = c.req.path;
@@ -198,6 +216,7 @@ export function makeApp(d: Deps): Hono {
     const own =
       path === "/quote" && post ? limits.quote
       : path === "/claims" && post ? limits.claims
+      : post && /^\/promos\/\d+\/cards$/.test(path) ? limits.cards
       : path === "/price" ? limits.price
       : path === "/intervals" ? limits.intervals
       : path === "/health/rpc" ? limits.rpc
@@ -237,6 +256,8 @@ export function makeApp(d: Deps): Hono {
       block: Number(block),
       // The commit this build was made from, when the host says (Railway does). Null on a laptop.
       commit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? null,
+      // Promos from this id on (covers excepted) are covered by claim cards. Null: none are.
+      cardsFromPromo: d.cardsFrom === undefined ? null : Number(d.cardsFrom),
       // The feed: what the QuickNode Stream has delivered, and how far the keeper's own read has come.
       stream: { ...d.feed.status(), webhook: d.streamSecret !== undefined },
     });
@@ -334,28 +355,6 @@ export function makeApp(d: Deps): Hono {
   // whose day has not begun, in the shape of `/games`. Each city and day is a "game", each range a "team".
   app.get("/weather", async (c) => c.json(await d.games.list(WEATHER)));
 
-  // Registers a customer on a promo. `userToken` is the customer's Circle login: the relayer asks Circle
-  // whose it is. One claim per Circle user per promo, for an address that is one of that user's wallets.
-  app.post("/claims", async (c) => {
-    const body = (await c.req.json()) as Record<string, unknown>;
-    if (!/^\d+$/.test(String(body.promoId))) throw new BadRequest("promoId must be a whole number");
-    if (typeof body.customer !== "string") throw new BadRequest("customer is required");
-    const promoId = BigInt(String(body.promoId));
-
-    // The test loop's customers are plain keys with no login. With the test key in the `X-Test-Key`
-    // header it names them itself (`testUser`). With no key set on the keeper this way in does not exist.
-    if (body.testUser !== undefined) {
-      if (d.testKey === undefined || !sameSecret(c.req.header("x-test-key"), d.testKey)) {
-        throw new ClaimRefusal("login", "Please log in again.");
-      }
-      if (typeof body.testUser !== "string" || body.testUser === "") throw new BadRequest("testUser must be a name");
-      return c.json(await d.relayer.registerTestClaim(promoId, body.customer, body.testUser));
-    }
-
-    if (typeof body.userToken !== "string" || body.userToken === "") throw new BadRequest("userToken is required");
-    return c.json(await d.relayer.registerClaim(promoId, body.customer, body.userToken));
-  });
-
   // A promo as the chain has it, in one call, kept for a second and shared by every request that comes
   // in meanwhile: when an event arrives, every page that shows the promo asks at once. Null is a promo
   // the vault does not have.
@@ -381,13 +380,13 @@ export function makeApp(d: Deps): Hono {
   function readPromo(id: bigint): ReturnType<typeof readChain> {
     const key = id.toString();
     const held = reads.get(key);
-    if (held && Date.now() - held.at < PROMO_READ_MS) return held.value;
+    if (held && clock() - held.at < PROMO_READ_MS) return held.value;
     const value = readChain(id);
     // Ids nobody asks about again would otherwise stay for good.
     if (reads.size >= MAX_PROMO_READS) {
-      for (const [k, read] of reads) if (Date.now() - read.at >= PROMO_READ_MS) reads.delete(k);
+      for (const [k, read] of reads) if (clock() - read.at >= PROMO_READ_MS) reads.delete(k);
     }
-    reads.set(key, { at: Date.now(), value });
+    reads.set(key, { at: clock(), value });
     // A read that failed is not served again.
     value.catch(() => {
       if (reads.get(key)?.value === value) reads.delete(key);
@@ -397,6 +396,109 @@ export function makeApp(d: Deps): Hono {
   // An event changes its promo: the next request reads the chain again.
   d.feed.subscribe((event) => {
     if (event.promoId !== null) reads.delete(event.promoId);
+  });
+
+  /** True for a promo covered by claim cards. With the switch off, or below it, the chain is not read. */
+  async function cardPromo(id: bigint): Promise<boolean> {
+    if (d.cardsFrom === undefined || id < d.cardsFrom) return false;
+    const read = await readPromo(id);
+    return read !== null && isCardPromo(d.cardsFrom, id, read.promo.hedgeMode);
+  }
+
+  // Registers a customer on a promo. `userToken` is the customer's Circle login: the relayer asks Circle
+  // whose it is. One claim per Circle user per promo, for an address that is one of that user's wallets.
+  // A promo covered by claim cards takes no open claims: its customers hold cards.
+  app.post("/claims", async (c) => {
+    const body = (await c.req.json()) as Record<string, unknown>;
+    if (!/^\d+$/.test(String(body.promoId))) throw new BadRequest("promoId must be a whole number");
+    if (typeof body.customer !== "string") throw new BadRequest("customer is required");
+    const promoId = BigInt(String(body.promoId));
+    if (await cardPromo(promoId)) {
+      throw new ClaimRefusal("cards-only", "This promo uses cards. Ask for yours where you bought.");
+    }
+
+    // The test loop's customers are plain keys with no login. With the test key in the `X-Test-Key`
+    // header it names them itself (`testUser`). With no key set on the keeper this way in does not exist.
+    if (body.testUser !== undefined) {
+      if (d.testKey === undefined || !sameSecret(c.req.header("x-test-key"), d.testKey)) {
+        throw new ClaimRefusal("login", "Please log in again.");
+      }
+      if (typeof body.testUser !== "string" || body.testUser === "") throw new BadRequest("testUser must be a name");
+      return c.json(await d.relayer.registerTestClaim(promoId, body.customer, body.testUser));
+    }
+
+    if (typeof body.userToken !== "string" || body.userToken === "") throw new BadRequest("userToken is required");
+    return c.json(await d.relayer.registerClaim(promoId, body.customer, body.userToken));
+  });
+
+  // Claim cards: the merchant's browser made one small wallet per card and sends their addresses here,
+  // never their keys. `userToken` is the merchant's Circle login (or the test loop's `X-Test-Key`). The
+  // relayer registers each card as a claimant, one `registerClaim` at a time, after the answer (202).
+  // Cards already registered are skipped, so the page sends the same list again to resume.
+  app.post("/promos/:id/cards", bodyLimit({ maxSize: 64 * 1024 }), async (c) => {
+    const raw = c.req.param("id");
+    if (!/^\d+$/.test(raw)) throw new BadRequest("promo id must be a whole number");
+    const id = BigInt(raw);
+    const body = (await c.req.json()) as Record<string, unknown>;
+    const list = body.cards;
+    if (!Array.isArray(list) || list.length === 0 || list.length > MAX_CARDS_PER_REQUEST) {
+      throw new BadRequest(`cards must be a list of 1 to ${MAX_CARDS_PER_REQUEST} addresses`);
+    }
+    if (body.userToken !== undefined && typeof body.userToken !== "string") throw new BadRequest("userToken must be text");
+
+    // The cheap checks first: Circle is asked nothing for a request that cannot go through.
+    const read = await readPromo(id);
+    if (read === null) throw new ClaimRefusal("unknown-promo", "We could not find this promotion.");
+    const { promo: p, claimants } = read;
+    if (!isCardPromo(d.cardsFrom, id, p.hedgeMode)) throw new ClaimRefusal("not-cards", "This promo doesn't use cards.");
+    if (p.claimSigner.toLowerCase() !== d.relayer.address.toLowerCase()) {
+      throw new ClaimRefusal("not-our-promo", "This promotion does not take claims here.");
+    }
+    const now = Math.floor(clock() / 1000);
+    if (p.status !== Status.Open || BigInt(now) >= p.claimDeadline) {
+      throw new ClaimRefusal("closed", "This promo has stopped taking customers, so its cards can't be made ready.");
+    }
+    const unusable = new Set([zeroAddress, d.vault, d.usdc].map((a) => a.toLowerCase()));
+    const seen = new Set<string>();
+    const cards: Address[] = [];
+    for (const card of list) {
+      if (typeof card !== "string" || !isAddress(card) || unusable.has(card.toLowerCase())) {
+        throw new ClaimRefusal("bad-card", "One of these cards can't be used. Make the cards again.");
+      }
+      if (seen.has(card.toLowerCase())) throw new ClaimRefusal("bad-card", "The same card is in the list twice.");
+      seen.add(card.toLowerCase());
+      cards.push(getAddress(card));
+    }
+    const registered = new Set(claimants.map((a) => a.toLowerCase()));
+    const fresh = cards.filter((card) => !registered.has(card.toLowerCase()));
+    // A card already in the relayer's line counts once, whether or not this list names it again.
+    const coming = new Set(fresh.map((card) => card.toLowerCase()));
+    for (const queued of d.relayer.queuedCards(id)) if (!registered.has(queued)) coming.add(queued);
+    if (p.claimCount + coming.size > p.maxClaims) {
+      throw new ClaimRefusal("full", `This promo takes ${p.maxClaims} card${p.maxClaims === 1 ? "" : "s"}, and these are more.`);
+    }
+
+    // Only the merchant who paid for the promo makes its cards.
+    if (d.testKey === undefined || !sameSecret(c.req.header("x-test-key"), d.testKey)) {
+      if (typeof body.userToken !== "string") throw new ClaimRefusal("login", "Please log in again.");
+      await d.relayer.checkMerchant(body.userToken, p.merchant);
+    }
+
+    const queued = fresh.length === 0 ? 0 : d.relayer.queueCards(id, fresh);
+    return c.json(
+      {
+        promoId: raw,
+        /** Cards in this request. */
+        cards: cards.length,
+        /** Of those, the ones already registered: nothing is sent for them. */
+        alreadyRegistered: cards.length - fresh.length,
+        /** Of those, the ones this request put in the relayer's line. */
+        queued,
+        /** Every card of this promo now waiting in the line. */
+        waiting: d.relayer.queuedCards(id).length,
+      },
+      202,
+    );
   });
 
   // The vault as a liquidity provider reads it: its books, every promo with what it locks and what it
@@ -587,10 +689,22 @@ export function makeApp(d: Deps): Hono {
       };
     }
 
+    const cards = isCardPromo(d.cardsFrom, id, p.hedgeMode);
+
     return c.json({
       promoId: raw,
+      /** The vault the promo is on. Promo ids start again at 0 on a new vault. */
+      vault: d.vault,
       status: statusName(p.status),
       merchant: p.merchant,
+      /** True when the promo's customers are covered by claim cards, not by the open claim link. */
+      cards,
+      /**
+       * Card promos only: the card addresses registered so far (the promo's claimants, in order), and how
+       * many more wait in the relayer's line. A card the merchant's page holds that is in neither still
+       * needs sending. Null for any other promo.
+       */
+      cardProgress: cards ? { registered: claimants, queued: d.relayer.queuedCards(id).length } : null,
       eventId: event?.eventId ?? null,
       eventTicker: event?.eventTicker ?? null,
       eventTitle: event?.title ?? null,

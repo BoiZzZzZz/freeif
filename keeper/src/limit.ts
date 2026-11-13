@@ -102,6 +102,8 @@ export type Limits = {
   quote: Rule;
   /** `POST /claims`: two calls to Circle each, and a transaction. */
   claims: Rule;
+  /** `POST /promos/:id/cards`: two calls to Circle each, and a transaction per card. */
+  cards: Rule;
   /** `GET /intervals`: four reads of Gemini each. */
   intervals: Rule;
   /** `GET /health/rpc`: a call to every RPC endpoint. */
@@ -115,6 +117,7 @@ export const LIMITS: Limits = {
   price: { name: "price", max: 120, windowMs: MINUTE },
   quote: { name: "quote", max: 10, windowMs: MINUTE },
   claims: { name: "claims", max: 30, windowMs: MINUTE },
+  cards: { name: "cards", max: 10, windowMs: MINUTE },
   intervals: { name: "intervals", max: 20, windowMs: MINUTE },
   rpc: { name: "rpc", max: 6, windowMs: MINUTE },
   streams: { perClient: 60, inAll: 1_000 },

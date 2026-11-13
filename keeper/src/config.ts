@@ -53,6 +53,18 @@ export const circleApiKey = (): string => env("CIRCLE_API_KEY");
 export const claimTestKey = (): string | undefined => optional("CLAIM_TEST_KEY");
 
 /**
+ * Claim cards: a promo with this id or a higher one, unless it is a cover (hedge mode), is covered by
+ * cards the merchant prints, and the open claim (`POST /claims`) refuses it. Unset, no promo uses cards.
+ * The switch exists so that promos already open on a vault keep the way they were sold.
+ */
+export function cardsFromPromo(): bigint | undefined {
+  const raw = optional("CARDS_FROM_PROMO");
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw)) throw new Error(`CARDS_FROM_PROMO must be a promo id (a whole number), got "${raw}"`);
+  return BigInt(raw);
+}
+
+/**
  * The secret the QuickNode Stream sends with every delivery, in the header `x-stream-secret`. Unset,
  * `POST /stream` refuses everything and the feed is filled from the chain alone.
  */
