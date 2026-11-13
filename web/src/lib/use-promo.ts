@@ -9,6 +9,11 @@ import { KEEPER_URL } from "./config";
 import { keeper, KeeperError, type FeedEvent, type Promo } from "./keeper";
 
 const FINISHED = new Set(["PaidOut", "FinalizedNo", "Voided"]);
+/**
+ * When the promo is read after an event. Several events in one block (three payouts) arrive together and
+ * share these reads. The later two are for a keeper whose node is a moment behind the event.
+ */
+const AFTER_AN_EVENT_MS = [50, 1500, 5000];
 
 const byPosition = (a: FeedEvent, b: FeedEvent): number => a.block - b.block || a.logIndex - b.logIndex;
 
@@ -21,7 +26,7 @@ function withEvents(promo: Promo, known: FeedEvent[]): Promo {
 
 export type LivePromo = {
   promo: Promo | null;
-  /** True when the keeper does not know this promo. */
+  /** True when the keeper does not know this promo, and never has while this page was open. */
   missing: boolean;
   /** Puts a promo the caller has just read on the page. */
   show: (promo: Promo) => void;
@@ -49,6 +54,7 @@ export function usePromo(id: string, customer: string | null = null): LivePromo 
         (next) => {
           if (mine < shown.current) return;
           shown.current = mine;
+          setMissing(false);
           setPromo((held) => withEvents(next, held?.promoId === next.promoId ? held.events : []));
         },
         (err) => {
@@ -75,7 +81,7 @@ export function usePromo(id: string, customer: string | null = null): LivePromo 
   useEffect(() => {
     if (finished || typeof EventSource === "undefined") return;
     const source = new EventSource(`${KEEPER_URL}/promos/${encodeURIComponent(id)}/events`);
-    let again: number | undefined;
+    let again: number[] = [];
     source.addEventListener("ready", () => setConnected(true));
     source.addEventListener("vault", (message) => {
       let event: FeedEvent;
@@ -84,20 +90,19 @@ export function usePromo(id: string, customer: string | null = null): LivePromo 
       } catch {
         return;
       }
+      // The line shows at once; the promo's numbers follow from the reads.
       setPromo((held) => (held ? withEvents(held, [event]) : held));
-      void load();
-      // The keeper reads the promo's numbers from the chain, and its node can be a block behind the
-      // delivery: read once more a moment later.
-      window.clearTimeout(again);
-      again = window.setTimeout(() => void load(), 1500);
+      again.forEach((timer) => window.clearTimeout(timer));
+      again = AFTER_AN_EVENT_MS.map((ms) => window.setTimeout(() => void load(), ms));
     });
     // The browser reconnects by itself; until it has, the timer above reads every few seconds.
     source.onerror = () => setConnected(false);
     return () => {
       source.close();
-      window.clearTimeout(again);
+      again.forEach((timer) => window.clearTimeout(timer));
     };
   }, [id, finished, load]);
 
-  return { promo, missing, show };
+  // A promo that has been on the page exists, whatever one later answer says.
+  return { promo, missing: missing && promo === null, show };
 }
