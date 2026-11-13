@@ -79,6 +79,9 @@ export function LpView() {
   const [account, setAccount] = useState<Address | null>(null);
   const [mine, setMine] = useState<Position | null>(null);
   const [walletError, setWalletError] = useState<string | null>(null);
+  // Counts this wallet's own deposits and withdrawals: what it holds is read again right after one,
+  // without waiting for the event to reach the keeper.
+  const [moves, setMoves] = useState(0);
   const now = Math.floor(useNow(15_000) / 1000);
   const address = vault?.vault;
   const block = vault?.block;
@@ -100,7 +103,7 @@ export function LpView() {
     return () => {
       live = false;
     };
-  }, [account, address, block]);
+  }, [account, address, block, moves]);
 
   if (!vault) {
     return (
@@ -178,7 +181,16 @@ export function LpView() {
         </p>
       </section>
 
-      <Trade vault={vault} account={account} held={held} onDone={reload} onConnect={setAccount} />
+      <Trade
+        vault={vault}
+        account={account}
+        held={held}
+        onDone={() => {
+          setMoves((n) => n + 1);
+          return reload();
+        }}
+        onConnect={setAccount}
+      />
 
       <section className="mt-8">
         <h2 className="label mb-2">Open promos</h2>
