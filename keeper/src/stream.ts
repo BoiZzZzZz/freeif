@@ -282,14 +282,18 @@ export class Feed {
     return added;
   }
 
-  /** Takes one delivery from the Stream. `logs` counts the vault's events in it, `added` the new ones. */
-  deliver(body: unknown): { logs: number; added: number } {
+  /**
+   * Takes one delivery from the Stream. `logs` counts the vault's events in it, `added` the new ones.
+   * `signed` says the delivery carried QuickNode's signature and it was right.
+   */
+  deliver(body: unknown, signed = false): { logs: number; added: number } {
     const { store, vault } = this.#d;
     const logs = readDelivery(body).filter((log) => decodeLog(log, vault, "stream", 0) !== null);
     if (logs.length === 0) return { logs: 0, added: 0 };
     const added = this.add(logs, "stream");
     const feed = store.data.feed;
     feed.deliveries += 1;
+    if (signed) feed.signed = (feed.signed ?? 0) + 1;
     feed.lastDeliveryAt = this.#now();
     store.save();
     return { logs: logs.length, added: added.length };
@@ -310,6 +314,8 @@ export class Feed {
     const feed = this.#d.store.data.feed;
     return {
       deliveries: feed.deliveries,
+      /** How many of them carried QuickNode's signature. */
+      signed: feed.signed ?? 0,
       /** Unix seconds. Null until the Stream has delivered a vault event. */
       lastDeliveryAt: feed.lastDeliveryAt === null ? null : Math.floor(feed.lastDeliveryAt / 1000),
       events: feed.events.length,

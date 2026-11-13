@@ -5,12 +5,13 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { createHmac } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { toEventSelector, type Address, type Hex } from "viem";
 import { promoVaultAbi } from "../src/abi.ts";
 import type { PublicClient } from "../src/chain.ts";
 import "../src/config.ts";
-import { makeApp } from "../src/server.ts";
+import { makeApp, validSignature } from "../src/server.ts";
 import { Store } from "../src/store.ts";
 import { FEED_EVENTS, Feed, decodeLog, firstBlockOf, readDelivery, type FeedEvent } from "../src/stream.ts";
 
@@ -204,7 +205,7 @@ test("deliver_aBlocksEvents_areAddedOnce_howeverOftenItIsDelivered", () => {
   assert.deepEqual(feed.deliver(delivery(paidBlock)), { logs: 3, added: 0 });
   assert.equal(store.data.feed.events.length, 3);
   assert.ok(store.data.feed.events.every((e) => e.via === "stream" && e.seenAt === 9_000));
-  assert.deepEqual(feed.status(), { deliveries: 2, lastDeliveryAt: 9, events: 3, byStream: 3, cursor: null });
+  assert.deepEqual(feed.status(), { deliveries: 2, signed: 0, lastDeliveryAt: 9, events: 3, byStream: 3, cursor: null });
 });
 
 test("deliver_aMessageWithNoVaultEvent_countsAsNoDelivery", () => {
@@ -403,7 +404,7 @@ test("postStream_aDelivery_isInTheFeed_markedAsTheStreams", async () => {
   const { app, post } = makeHttp();
   const res = await post(delivery(paidBlock));
   assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { ok: true, logs: 3, added: 3 });
+  assert.deepEqual(await res.json(), { ok: true, signed: false, logs: 3, added: 3 });
 
   const feed = (await (await app.request("/feed")).json()) as { stream: { deliveries: number; byStream: number }; events: FeedEvent[] };
   assert.equal(feed.stream.deliveries, 1);
@@ -430,7 +431,7 @@ test("postStream_quickNodesTestMessage_isAnswered200_andABodyThatIsNotJsonIs400"
   const { app, store, post } = makeHttp();
   const ping = await post({ message: "PING" });
   assert.equal(ping.status, 200);
-  assert.deepEqual(await ping.json(), { ok: true, logs: 0, added: 0 });
+  assert.deepEqual(await ping.json(), { ok: true, signed: false, logs: 0, added: 0 });
 
   const bad = await app.request("/stream", { method: "POST", headers: { "x-stream-secret": SECRET }, body: "not json" });
   assert.equal(bad.status, 400);
@@ -465,4 +466,149 @@ test("getPromoEvents_sendsAPromosEventTheMomentItIsDelivered_andNoOtherPromos", 
   assert.equal(lines.length, 1);
   const event = JSON.parse(lines[0]!.slice("data: ".length)) as FeedEvent;
   assert.deepEqual([event.event, event.promoId, event.claimCount, event.via], ["ClaimRegistered", "1", 1, "stream"]);
+});
+
+// ---- QuickNode's signature on a delivery ----
+
+/** A delivery signed the way QuickNode signs one: HMAC-SHA256 of nonce + timestamp + body, in hex. */
+function signedHeaders(body: string, token = SECRET): Record<string, string> {
+  const nonce = "5f2b9c1e0d3a4b6c8e7f9a0b1c2d3e4f";
+  const timestamp = "1794559000";
+  const signature = createHmac("sha256", token).update(nonce + timestamp + body).digest("hex");
+  return { "content-type": "application/json", "x-qn-nonce": nonce, "x-qn-timestamp": timestamp, "x-qn-signature": signature };
+}
+
+test("validSignature_isTheHmacOfNonceTimestampAndBody_underTheToken", () => {
+  const body = JSON.stringify(delivery(paidBlock));
+  const h = signedHeaders(body);
+  const check = (token: string, nonce: string | undefined, time: string | undefined, text: string, given: string | undefined) =>
+    validSignature(token, nonce, time, text, given);
+  assert.equal(check(SECRET, h["x-qn-nonce"], h["x-qn-timestamp"], body, h["x-qn-signature"]), true);
+  assert.equal(check(SECRET, h["x-qn-nonce"], h["x-qn-timestamp"], body, h["x-qn-signature"]!.toUpperCase()), true);
+  // Another token, another body, another nonce or time: not this delivery's signature.
+  assert.equal(check("another token", h["x-qn-nonce"], h["x-qn-timestamp"], body, h["x-qn-signature"]), false);
+  assert.equal(check(SECRET, h["x-qn-nonce"], h["x-qn-timestamp"], `${body} `, h["x-qn-signature"]), false);
+  assert.equal(check(SECRET, "00", h["x-qn-timestamp"], body, h["x-qn-signature"]), false);
+  assert.equal(check(SECRET, h["x-qn-nonce"], "1794559001", body, h["x-qn-signature"]), false);
+  // Missing parts, and a signature that is not 64 hex characters.
+  assert.equal(check(SECRET, undefined, h["x-qn-timestamp"], body, h["x-qn-signature"]), false);
+  assert.equal(check(SECRET, h["x-qn-nonce"], undefined, body, h["x-qn-signature"]), false);
+  assert.equal(check(SECRET, h["x-qn-nonce"], h["x-qn-timestamp"], body, undefined), false);
+  assert.equal(check(SECRET, h["x-qn-nonce"], h["x-qn-timestamp"], body, "abcd"), false);
+  assert.equal(check(SECRET, h["x-qn-nonce"], h["x-qn-timestamp"], body, "zz".repeat(32)), false);
+});
+
+test("postStream_aSignedDelivery_isTakenWithoutTheSecretHeader_andCountedAsSigned", async () => {
+  const { app, feed } = makeHttp();
+  const body = JSON.stringify(delivery(paidBlock));
+  const res = await app.request("/stream", { method: "POST", headers: signedHeaders(body), body });
+  assert.equal(res.status, 200);
+  assert.deepEqual(await res.json(), { ok: true, signed: true, logs: 3, added: 3 });
+  assert.equal(feed.status().signed, 1);
+});
+
+test("postStream_aSignatureMadeWithAnotherToken_orOverAnotherBody_isRefused", async () => {
+  const { app, store } = makeHttp();
+  const body = JSON.stringify(delivery(paidBlock));
+  const forged = await app.request("/stream", { method: "POST", headers: signedHeaders(body, "a guess at the token"), body });
+  assert.equal(forged.status, 401);
+  // A real signature, moved to a body it was not made for.
+  const moved = await app.request("/stream", { method: "POST", headers: signedHeaders(body), body: JSON.stringify(delivery([claims[0]!])) });
+  assert.equal(moved.status, 401);
+  assert.equal(store.data.feed.events.length, 0);
+});
+
+test("postStream_onAKeeperWithNoSecretSet_refusesASignedDeliveryToo", async () => {
+  const { app, store } = makeHttp(null);
+  const body = JSON.stringify(delivery(paidBlock));
+  for (const token of ["", "undefined", SECRET]) {
+    const res = await app.request("/stream", { method: "POST", headers: signedHeaders(body, token), body });
+    assert.equal(res.status, 401);
+  }
+  assert.equal(store.data.feed.events.length, 0);
+});
+
+// ---- GET /promos/:id reads the chain once for everyone ----
+
+/** A vault with `count` promos, read through multicall, that counts how often it is read. */
+function fakeVault(count: number) {
+  const calls = { multicall: 0, owed: 0 };
+  const promo = {
+    merchant: VAULT,
+    claimSigner: VAULT,
+    geminiEventId: `0x${"11".repeat(32)}` as Hex,
+    instrumentSymbol: `0x${"22".repeat(32)}` as Hex,
+    payoutPerClaim: 1_000_000n,
+    maxClaims: 3,
+    claimCount: 3,
+    paidCount: 0,
+    premiumPaid: 2_240_000n,
+    collateralLocked: 3_000_000n,
+    claimDeadline: 1794543060n,
+    marketCloseTime: 1794543300n,
+    settledAt: 0n,
+    status: 0,
+    outcomeYes: false,
+    hedgeMode: false,
+  };
+  const client = {
+    multicall: async ({ contracts }: { contracts: Array<{ functionName: string; args?: readonly bigint[] }> }) => {
+      calls.multicall++;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return contracts.map(({ functionName, args }) => {
+        if (functionName === "promoCount") return { status: "success", result: BigInt(count) };
+        if (functionName === "totalOwedPayouts") return { status: "success", result: 0n };
+        if (args![0]! >= BigInt(count)) return { status: "failure", error: new Error("UnknownPromo") };
+        if (functionName === "getPromo") return { status: "success", result: promo };
+        return { status: "success", result: ["0x6f3DE22768B24a4cAE412BF3575E691488B7d6E4", "0x2235755531e63f2c716C3167e622685d79C12477"] };
+      });
+    },
+    readContract: async () => {
+      calls.owed++;
+      return 0n;
+    },
+  } as unknown as PublicClient;
+  const unused = {} as never;
+  const { store, feed } = makeFeed();
+  const app = makeApp({ client, vault: VAULT, pricer: unused, games: unused, relayer: unused, oracle: VAULT, store, feed, streamSecret: SECRET });
+  return { app, feed, calls };
+}
+
+test("getPromo_manyRequestsAtOnce_readTheChainOnce", async () => {
+  const { app, calls } = fakeVault(2);
+  const answers = await Promise.all(
+    Array.from({ length: 24 }, (_, i) => app.request(i % 2 ? "/promos/1?customer=0x2235755531e63f2c716C3167e622685d79C12477" : "/promos/1")),
+  );
+  assert.deepEqual([...new Set(answers.map((res) => res.status))], [200]);
+  assert.equal(calls.multicall, 1);
+  // Nothing is owed anywhere in the vault, so no customer's owed payout is read.
+  assert.equal(calls.owed, 0);
+
+  const withCustomer = (await answers[1]!.json()) as { status: string; claimCount: number; customer: { number: number; paid: boolean; owed: string } };
+  assert.deepEqual([withCustomer.status, withCustomer.claimCount], ["Open", 3]);
+  assert.deepEqual(withCustomer.customer, { address: "0x2235755531e63f2c716C3167e622685d79C12477", number: 2, paid: false, owed: "0" });
+});
+
+test("getPromo_afterAnEventOnThePromo_readsTheChainAgain", async () => {
+  const { app, feed, calls } = fakeVault(2);
+  assert.equal((await app.request("/promos/1")).status, 200);
+  assert.equal((await app.request("/promos/1")).status, 200);
+  assert.equal(calls.multicall, 1);
+
+  // Promo 0's event leaves promo 1's read alone; promo 1's own event does not.
+  feed.deliver(delivery([named("Finalized")[0]!]));
+  await app.request("/promos/1");
+  assert.equal(calls.multicall, 1);
+  feed.deliver(delivery([claims[0]!]));
+  const res = await app.request("/promos/1");
+  assert.equal(calls.multicall, 2);
+  const body = (await res.json()) as { events: FeedEvent[] };
+  assert.deepEqual(body.events.map((e) => e.event), ["ClaimRegistered"]);
+});
+
+test("getPromo_aPromoTheVaultDoesNotHave_is404", async () => {
+  const { app } = fakeVault(2);
+  const res = await app.request("/promos/2");
+  assert.equal(res.status, 404);
+  assert.equal(((await res.json()) as { error: { code: string } }).error.code, "unknown-promo");
 });

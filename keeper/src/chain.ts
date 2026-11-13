@@ -7,6 +7,7 @@ import {
   http,
   type Address,
   type Hex,
+  type Transport,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { CHAIN_ID, PUBLIC_RPC_URL, rpcUrls } from "./config.ts";
@@ -24,7 +25,61 @@ export const arcTestnet = defineChain({
 
 export const explorerTx = (hash: Hex): string => `${arcTestnet.blockExplorers.default.url}/tx/${hash}`;
 
-const transport = () => fallback(rpcUrls().map((url) => http(url, { timeout: 15_000 })));
+/** The newest block any endpoint has reported. One per process: every client shares it. */
+export type Head = { block: number };
+const head: Head = { block: 0 };
+
+/** A second endpoint may be this many blocks behind the newest block seen and still be asked. */
+export const MAX_LAG_BLOCKS = 20;
+/** How long one check of a second endpoint's block number is trusted. */
+const LAG_CHECK_MS = 5_000;
+
+/** Notes the newest block the first endpoint reports, so the others can be measured against it. */
+export function tracking(inner: Transport, seen: Head): Transport {
+  return (options) => {
+    const made = inner(options);
+    const request = (async (args: { method: string }, ...rest: unknown[]) => {
+      const result = await (made.request as (...a: unknown[]) => Promise<unknown>)(args, ...rest);
+      if (args.method === "eth_blockNumber") seen.block = Math.max(seen.block, Number(result));
+      return result;
+    }) as typeof made.request;
+    return { ...made, request };
+  };
+}
+
+/**
+ * A second endpoint, asked only while it keeps up. An endpoint that has fallen behind does not fail: it
+ * answers, with old state, and a promo made a minute ago "does not exist". So before it is used (at most
+ * once every five seconds) its own block number is read, and when that is more than `MAX_LAG_BLOCKS`
+ * behind the newest block seen, the request fails instead, and the caller tries the first endpoint again.
+ */
+export function keepingUp(inner: Transport, seen: Head, now: () => number = Date.now): Transport {
+  let checkedAt = -Infinity;
+  let lag = 0;
+  return (options) => {
+    const made = inner(options);
+    const ask = made.request as (...a: unknown[]) => Promise<unknown>;
+    const request = (async (args: { method: string }, ...rest: unknown[]) => {
+      if (now() - checkedAt >= LAG_CHECK_MS) {
+        const block = Number(await ask({ method: "eth_blockNumber" }));
+        checkedAt = now();
+        lag = seen.block - block;
+      }
+      if (lag > MAX_LAG_BLOCKS) throw new Error(`this RPC endpoint is ${lag} blocks behind and is not used`);
+      return ask(args, ...rest);
+    }) as typeof made.request;
+    return { ...made, request };
+  };
+}
+
+/** The first endpoint, then the others for when it cannot be reached, each only while it keeps up. */
+const transport = () =>
+  fallback(
+    rpcUrls().map((url, i) => {
+      const endpoint = http(url, { timeout: 15_000 });
+      return i === 0 ? tracking(endpoint, head) : keepingUp(endpoint, head);
+    }),
+  );
 
 export function makePublicClient() {
   return createPublicClient({ chain: arcTestnet, transport: transport() });

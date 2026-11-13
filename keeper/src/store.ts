@@ -55,6 +55,8 @@ type Data = {
     /** Stream deliveries that carried a vault event: how many, and when the last one came (unix ms). */
     deliveries: number;
     lastDeliveryAt: number | null;
+    /** How many of the deliveries carried QuickNode's signature. Absent in a file from before it was counted. */
+    signed?: number;
   };
 };
 

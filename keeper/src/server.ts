@@ -1,7 +1,7 @@
 // The keeper's HTTP API: prices and signed quotes for the merchant form, claims for the customer page,
 // the QuickNode Stream's webhook, and the vault's events for the pages that show a promo.
 // Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seconds.
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -39,6 +39,8 @@ class BadRequest extends Error {}
 
 /** An open event stream gets a line this often when nothing happens, so no proxy closes it as idle. */
 const EVENTS_PING_MS = 20_000;
+/** How long a promo read from the chain is served again before the chain is asked once more. */
+const PROMO_READ_MS = 1_000;
 const MAX_DELIVERY_BYTES = 2 * 1024 * 1024;
 
 /**
@@ -91,6 +93,22 @@ function sameSecret(given: string | undefined, secret: string): boolean {
   if (given === undefined) return false;
   const hash = (text: string) => createHash("sha256").update(text).digest();
   return timingSafeEqual(hash(given), hash(secret));
+}
+
+/**
+ * QuickNode signs each delivery: the hex HMAC-SHA256, under the Stream's security token, of the nonce,
+ * the timestamp and the body as one string (the body after decompression, exactly as sent).
+ */
+export function validSignature(
+  token: string,
+  nonce: string | undefined,
+  timestamp: string | undefined,
+  body: string,
+  given: string | undefined,
+): boolean {
+  if (!nonce || !timestamp || given === undefined || !/^[0-9a-fA-F]{64}$/.test(given)) return false;
+  const expected = createHmac("sha256", token).update(nonce + timestamp + body).digest();
+  return timingSafeEqual(expected, Buffer.from(given, "hex"));
 }
 
 function parsePriceRequest(input: Record<string, unknown>): PriceRequest {
@@ -159,19 +177,32 @@ export function makeApp(d: Deps): Hono {
   // The QuickNode Stream's webhook. A delivery is the vault's logs of one block, as `stream/filter.js`
   // returns them. Only a request that carries the Stream's secret is read.
   app.post("/stream", bodyLimit({ maxSize: MAX_DELIVERY_BYTES }), async (c) => {
-    if (d.streamSecret === undefined || !sameSecret(c.req.header("x-stream-secret"), d.streamSecret)) {
-      return c.json({ error: { code: "unauthorized", message: "This is the Stream's webhook." } }, 401);
-    }
-    let body: unknown;
+    const secret = d.streamSecret;
+    const refused = () => c.json({ error: { code: "unauthorized", message: "This is the Stream's webhook." } }, 401);
+    if (secret === undefined) return refused();
+
+    let text: string;
     try {
       const bytes = Buffer.from(await c.req.arrayBuffer());
       const gzipped = /gzip/i.test(c.req.header("content-encoding") ?? "");
-      body = JSON.parse((gzipped ? gunzipSync(bytes, { maxOutputLength: MAX_DELIVERY_BYTES * 8 }) : bytes).toString("utf8"));
+      text = (gzipped ? gunzipSync(bytes, { maxOutputLength: MAX_DELIVERY_BYTES * 8 }) : bytes).toString("utf8");
+    } catch {
+      throw new BadRequest("the delivery cannot be read");
+    }
+    // Two proofs that a delivery is the Stream's: QuickNode's signature over the body, made with the
+    // Stream's security token, or the secret header the Stream is set to send. The token and the header
+    // are the same secret (scripts/stream.ts sets both).
+    const signed = validSignature(secret, c.req.header("x-qn-nonce"), c.req.header("x-qn-timestamp"), text, c.req.header("x-qn-signature"));
+    if (!signed && !sameSecret(c.req.header("x-stream-secret"), secret)) return refused();
+
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
     } catch {
       throw new BadRequest("the delivery is not JSON");
     }
     // A delivery with no vault event in it (QuickNode's test message) is answered the same way: 200.
-    return c.json({ ok: true, ...d.feed.deliver(body) });
+    return c.json({ ok: true, signed, ...d.feed.deliver(body, signed) });
   });
 
   // Every vault event as it happens, as server-sent events. `/promos/:id/events` is one promo's.
@@ -247,6 +278,45 @@ export function makeApp(d: Deps): Hono {
     return c.json(await d.relayer.registerClaim(promoId, body.customer, body.userToken));
   });
 
+  // A promo as the chain has it, in one call, kept for a second and shared by every request that comes
+  // in meanwhile: when an event arrives, every page that shows the promo asks at once. Null is a promo
+  // the vault does not have.
+  const reads = new Map<string, { at: number; value: ReturnType<typeof readChain> }>();
+  async function readChain(id: bigint) {
+    const call = { address: d.vault, abi: promoVaultAbi } as const;
+    const [count, totalOwed, promo, claimants] = await d.client.multicall({
+      allowFailure: true,
+      contracts: [
+        { ...call, functionName: "promoCount" },
+        { ...call, functionName: "totalOwedPayouts" },
+        { ...call, functionName: "getPromo", args: [id] },
+        { ...call, functionName: "getClaimants", args: [id] },
+      ],
+    });
+    if (count.status !== "success") throw count.error;
+    if (id >= count.result) return null;
+    if (promo.status !== "success") throw promo.error;
+    if (claimants.status !== "success") throw claimants.error;
+    if (totalOwed.status !== "success") throw totalOwed.error;
+    return { promo: promo.result, claimants: claimants.result, anyOwed: totalOwed.result > 0n };
+  }
+  function readPromo(id: bigint): ReturnType<typeof readChain> {
+    const key = id.toString();
+    const held = reads.get(key);
+    if (held && Date.now() - held.at < PROMO_READ_MS) return held.value;
+    const value = readChain(id);
+    reads.set(key, { at: Date.now(), value });
+    // A read that failed is not served again.
+    value.catch(() => {
+      if (reads.get(key)?.value === value) reads.delete(key);
+    });
+    return value;
+  }
+  // An event changes its promo: the next request reads the chain again.
+  d.feed.subscribe((event) => {
+    if (event.promoId !== null) reads.delete(event.promoId);
+  });
+
   // One promo's events as they happen, as server-sent events. A page that shows a promo keeps this open
   // and reads the promo again on every event.
   app.get("/promos/:id/events", (c) => {
@@ -262,9 +332,9 @@ export function makeApp(d: Deps): Hono {
     const raw = c.req.param("id");
     if (!/^\d+$/.test(raw)) throw new BadRequest("promo id must be a whole number");
     const id = BigInt(raw);
-    const count = await d.client.readContract({ address: d.vault, abi: promoVaultAbi, functionName: "promoCount" });
-    if (id >= count) return c.json({ error: { code: "unknown-promo", message: "We could not find this promotion." } }, 404);
-    const p = await d.client.readContract({ address: d.vault, abi: promoVaultAbi, functionName: "getPromo", args: [id] });
+    const read = await readPromo(id);
+    if (read === null) return c.json({ error: { code: "unknown-promo", message: "We could not find this promotion." } }, 404);
+    const { promo: p, claimants } = read;
     const event = d.store.data.events[p.geminiEventId];
     const instrument = d.store.data.instruments[p.instrumentSymbol];
 
@@ -286,10 +356,10 @@ export function makeApp(d: Deps): Hono {
     let customer = null;
     if (who !== undefined) {
       if (!isAddress(who)) throw new BadRequest("customer must be an address");
-      const [claimants, owed] = await Promise.all([
-        d.client.readContract({ address: d.vault, abi: promoVaultAbi, functionName: "getClaimants", args: [id] }),
-        d.client.readContract({ address: d.vault, abi: promoVaultAbi, functionName: "owedPayout", args: [id, who] }),
-      ]);
+      // Nothing is owed to anyone unless a payout has failed somewhere, which the shared read says.
+      const owed = read.anyOwed
+        ? await d.client.readContract({ address: d.vault, abi: promoVaultAbi, functionName: "owedPayout", args: [id, who] })
+        : 0n;
       const index = claimants.findIndex((a) => a.toLowerCase() === who.toLowerCase());
       customer = {
         address: who,
