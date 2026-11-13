@@ -17,7 +17,8 @@
     "abi": "node scripts/gen-abi.mjs",
     "e2e": "node scripts/e2e.ts",
     "stream": "node scripts/stream.ts",
-    "ship": "node scripts/deploy.mjs"
+    "ship": "node scripts/deploy.mjs",
+    "topup": "node scripts/topup.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.7",

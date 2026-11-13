@@ -24,7 +24,10 @@ pnpm typecheck
 pnpm abi          # rewrite src/abi.ts after a contract change (run `forge build` in ../contracts first)
 pnpm ship         # deploy the pushed commit to Railway and wait for it
 pnpm stream on    # start the QuickNode Stream at the newest block (also: status, test, off, remove)
+pnpm topup        # move test USDC from the pricer (which spends none) to a wallet that is low; --list, --to, --amount, --send
 ```
+
+Test USDC: Circle's faucet API refuses this project's key (403; it needs an account upgraded to mainnet) and the public faucet at faucet.circle.com is a web page behind a captcha (20 USDC per address every 2 hours). The pricer wallet only signs and never sends, so its USDC is spare: `pnpm topup` moves it to the test merchant (by default up to $5), the deployer for a vault deposit, or any address. Without `--send` it only says what it would do, and it never takes a sending wallet below $5.
 
 Settings come from the environment. On a developer machine they are read from `~/.freeif/secrets.env` (or the file named in `FREEIF_SECRETS`), which is never inside this repo; variables already in the environment win.
 
