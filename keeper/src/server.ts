@@ -7,10 +7,10 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
-import { createPublicClient, http, isAddress, type Address } from "viem";
+import { createPublicClient, erc20Abi, http, isAddress, type Address } from "viem";
 import { promoVaultAbi } from "./abi.ts";
 import { CHAIN_ID, rpcUrls } from "./config.ts";
-import { arcTestnet, statusName, type PublicClient } from "./chain.ts";
+import { Status, arcTestnet, statusName, type PublicClient } from "./chain.ts";
 import { LEAGUES, type Games } from "./games.ts";
 import { getEvent, priceToBps, upcomingIntervalTickers } from "./gemini.ts";
 import { cleanText, findLabel } from "./labels.ts";
@@ -23,6 +23,10 @@ import type { Feed, FeedEvent } from "./stream.ts";
 type Deps = {
   client: PublicClient;
   vault: Address;
+  /** The token the vault holds. */
+  usdc: Address;
+  /** The pricing service's ceiling: it signs no quote that would leave more than this locked. */
+  maxLockedBps: number;
   pricer: Pricer;
   games: Games;
   relayer: Relayer;
@@ -41,6 +45,9 @@ class BadRequest extends Error {}
 const EVENTS_PING_MS = 20_000;
 /** How long a promo read from the chain is served again before the chain is asked once more. */
 const PROMO_READ_MS = 1_000;
+/** The same for the whole vault, which is every promo in one read. */
+const VAULT_READ_MS = 2_000;
+const VAULT_EVENTS = 60;
 const MAX_DELIVERY_BYTES = 2 * 1024 * 1024;
 
 /**
@@ -315,6 +322,121 @@ export function makeApp(d: Deps): Hono {
   // An event changes its promo: the next request reads the chain again.
   d.feed.subscribe((event) => {
     if (event.promoId !== null) reads.delete(event.promoId);
+  });
+
+  // The vault as a liquidity provider reads it: its books, every promo with what it locks and what it
+  // made, and the newest events. Everything is read at one block, kept for two seconds and shared; any
+  // event drops it.
+  let vaultRead: { at: number; value: ReturnType<typeof readVault> } | null = null;
+  async function readVault() {
+    const call = { address: d.vault, abi: promoVaultAbi } as const;
+    const blockNumber = await d.client.getBlockNumber();
+    const [balance, books] = await Promise.all([
+      d.client.readContract({ address: d.usdc, abi: erc20Abi, functionName: "balanceOf", args: [d.vault], blockNumber }),
+      d.client.multicall({
+        allowFailure: false,
+        blockNumber,
+        contracts: [
+          { ...call, functionName: "lockedCollateral" },
+          { ...call, functionName: "pendingCollateral" },
+          { ...call, functionName: "totalOwedPayouts" },
+          { ...call, functionName: "totalShares" },
+          { ...call, functionName: "maxExposureBps" },
+          { ...call, functionName: "paused" },
+          { ...call, functionName: "disputeWindow" },
+          { ...call, functionName: "promoCount" },
+        ],
+      }),
+    ]);
+    const [locked, pending, owed, totalShares, maxExposureBps, paused, disputeWindow, count] = books;
+    const ids = Array.from({ length: Number(count) }, (_, i) => BigInt(i));
+    const chain =
+      ids.length === 0
+        ? []
+        : await d.client.multicall({
+            allowFailure: false,
+            blockNumber,
+            contracts: ids.map((id) => ({ ...call, functionName: "getPromo", args: [id] }) as const),
+          });
+
+    let netEarned = 0n;
+    const promos = chain.map((p, i) => {
+      const raw = String(i);
+      const event = d.store.data.events[p.geminiEventId];
+      const instrument = d.store.data.instruments[p.instrumentSymbol];
+      const label = d.store.data.promoLabels[raw];
+      // What the vault made on a promo with a final result: the premium, less what its customers get.
+      // A "no" keeps the whole premium, a voided promo gave it back, and one still running is not counted.
+      let net: bigint | null = null;
+      if (p.status === Status.FinalizedNo) net = p.premiumPaid;
+      else if (p.status === Status.FinalizedYes || p.status === Status.PaidOut) net = p.premiumPaid - p.payoutPerClaim * BigInt(p.claimCount);
+      else if (p.status === Status.Voided) net = 0n;
+      if (net !== null) netEarned += net;
+      return {
+        promoId: raw,
+        status: statusName(p.status),
+        item: label?.item || null,
+        business: label?.business || null,
+        game: event?.game ?? event?.title ?? null,
+        condition: instrument?.condition ?? null,
+        premium: p.premiumPaid.toString(),
+        /** The most the promo can pay: what was locked when it was made. */
+        maxPayout: (p.payoutPerClaim * BigInt(p.maxClaims)).toString(),
+        /** What it still locks now. */
+        locked: p.collateralLocked.toString(),
+        payoutPerClaim: p.payoutPerClaim.toString(),
+        claimCount: p.claimCount,
+        maxClaims: p.maxClaims,
+        claimDeadline: Number(p.claimDeadline),
+        marketCloseTime: Number(p.marketCloseTime),
+        settledAt: Number(p.settledAt),
+        outcomeYes: p.outcomeYes,
+        net: net === null ? null : net.toString(),
+      };
+    });
+
+    const free = balance - locked;
+    return {
+      vault: d.vault,
+      usdc: d.usdc,
+      block: Number(blockNumber),
+      /** USDC the vault holds. */
+      balance: balance.toString(),
+      /** The part of it promised to promos, and to payouts that failed and wait. */
+      locked: locked.toString(),
+      /** The part of `locked` held by promos with no final result: it comes back if they end "no". */
+      pending: pending.toString(),
+      owed: owed.toString(),
+      /** `balance - locked`: what a withdrawal is priced on. */
+      free: free.toString(),
+      /** `free + pending`: what a deposit is priced on. */
+      depositBasis: (free + pending).toString(),
+      totalShares: totalShares.toString(),
+      /** The contract's cap: one promo's risk may be at most this part of `free`. */
+      maxExposureBps,
+      /** The pricing service's ceiling: no quote may leave more than this part of the vault locked. */
+      maxLockedBps: d.maxLockedBps,
+      paused,
+      disputeWindow,
+      /** Premiums kept on promos with a final result, less what those promos paid their customers. */
+      netEarned: netEarned.toString(),
+      promos,
+      /** The newest events on the vault, oldest first. */
+      events: d.feed.recent(VAULT_EVENTS),
+    };
+  }
+  d.feed.subscribe(() => {
+    vaultRead = null;
+  });
+  app.get("/vault", async (c) => {
+    if (vaultRead === null || Date.now() - vaultRead.at >= VAULT_READ_MS) {
+      const value = readVault();
+      vaultRead = { at: Date.now(), value };
+      value.catch(() => {
+        if (vaultRead?.value === value) vaultRead = null;
+      });
+    }
+    return c.json(await vaultRead.value);
   });
 
   // One promo's events as they happen, as server-sent events. A page that shows a promo keeps this open

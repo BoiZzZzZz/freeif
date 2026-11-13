@@ -26,6 +26,7 @@ type ChainLog = {
 };
 
 const VAULT: Address = "0x68a00243927f250dBcD9160b5d06623b62B2e06d";
+const USDC: Address = "0x3600000000000000000000000000000000000000";
 const SECRET = "the-streams-secret";
 const logs = JSON.parse(readFileSync(new URL("./fixtures/vault-logs.json", import.meta.url), "utf8")) as ChainLog[];
 const blockOf = (log: ChainLog): number => Number(log.blockNumber);
@@ -378,7 +379,7 @@ test("catchUp_olderLogsAreNotHeldBackByAYoungOne", async () => {
 function makeHttp(streamSecret: string | null = SECRET) {
   const unused = {} as never;
   const { store, feed } = makeFeed();
-  const app = makeApp({ client: unused, vault: VAULT, pricer: unused, games: unused, relayer: unused, oracle: VAULT, store, feed, streamSecret: streamSecret ?? undefined });
+  const app = makeApp({ client: unused, vault: VAULT, usdc: USDC, maxLockedBps: 6000, pricer: unused, games: unused, relayer: unused, oracle: VAULT, store, feed, streamSecret: streamSecret ?? undefined });
   const post = (body: unknown, headers: Record<string, string> = { "x-stream-secret": SECRET }) =>
     app.request("/stream", { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   return { app, store, feed, post };
@@ -570,7 +571,7 @@ function fakeVault(count: number) {
   } as unknown as PublicClient;
   const unused = {} as never;
   const { store, feed } = makeFeed();
-  const app = makeApp({ client, vault: VAULT, pricer: unused, games: unused, relayer: unused, oracle: VAULT, store, feed, streamSecret: SECRET });
+  const app = makeApp({ client, vault: VAULT, usdc: USDC, maxLockedBps: 6000, pricer: unused, games: unused, relayer: unused, oracle: VAULT, store, feed, streamSecret: SECRET });
   return { app, feed, calls };
 }
 

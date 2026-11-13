@@ -176,7 +176,7 @@ function route(testKey?: string) {
   const unused = {} as never;
   const store = new Store(null);
   const feed = new Feed({ store, vault: VAULT });
-  const app = makeApp({ client: unused, vault: VAULT, pricer: unused, games: unused, relayer, oracle: RELAYER, store, feed, testKey });
+  const app = makeApp({ client: unused, vault: VAULT, usdc: VAULT, maxLockedBps: 6000, pricer: unused, games: unused, relayer, oracle: RELAYER, store, feed, testKey });
   const post = async (body: unknown, headers: Record<string, string> = {}) => {
     const res = await app.request("/claims", {
       method: "POST",

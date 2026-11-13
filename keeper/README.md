@@ -6,7 +6,7 @@ One Node process that does five jobs for `PromoVault`:
 - **Pricing.** Reads the ask for a result from Gemini's prediction-market API, adds the spread, checks the vault can cover the promo, and signs the EIP-712 quote that `createPromo` checks.
 - **Claim relayer.** Its key is every promo's claim signer, so it is the only address that can register a customer. A claim carries the customer's Circle login token; the relayer asks Circle whose it is and registers only that user's own wallet, once per user per promo.
 - **Settlement loop.** Every 30 seconds: posts Gemini's result once claims are closed (`settle`), finalizes after the dispute window (`finalize`), pays the customers of a "yes" (`payoutBatch`), and retries payouts whose transfer failed (`retryPayout`).
-- **Stream webhook.** Not built yet.
+- **Event feed.** A QuickNode Stream posts the vault's logs to `POST /stream` as blocks land. The keeper decodes them, keeps them, and pushes each one to the pages that show its promo. It also reads the chain's logs itself, a few seconds behind, for any event the Stream has not delivered. Each event remembers which way it came.
 
 Each step of the loop is decided from on-chain state and simulated before it is sent, so a restart never repeats one.
 
@@ -21,6 +21,7 @@ pnpm test         # unit tests (Gemini, Circle and the chain are fakes), plus th
 pnpm typecheck
 pnpm abi          # rewrite src/abi.ts after a contract change (run `forge build` in ../contracts first)
 pnpm ship         # deploy the pushed commit to Railway and wait for it
+pnpm stream on    # start the QuickNode Stream at the newest block (also: status, test, off, remove)
 ```
 
 Settings come from the environment. On a developer machine they are read from `~/.freeif/secrets.env` (or the file named in `FREEIF_SECRETS`), which is never inside this repo; variables already in the environment win.
@@ -31,7 +32,10 @@ Settings come from the environment. On a developer machine they are read from `~
 | `PRICER_PK`, `ORACLE_PK`, `RELAYER_PK` | The three service keys. The keeper refuses to start if the first two are not the vault's `pricer` and `oracle` |
 | `CIRCLE_API_KEY` | Circle's API key, the one the web app uses. The relayer asks Circle whose login a claim carries. Required |
 | `CLAIM_TEST_KEY` | Optional. A secret that lets the test loop register customers that have no login (see `POST /claims`). Unset, that way in does not exist |
-| `ARC_RPC_URL`, `QUICKNODE_ARC_RPC_URL` | RPC endpoints, tried in that order. Default: the public Arc testnet RPC |
+| `ARC_RPC_URL`, `QUICKNODE_ARC_RPC_URL` | RPC endpoints. The first is asked; the second only when the first cannot answer, and only while it is within 20 blocks of the first. Default: the public Arc testnet RPC |
+| `QUICKNODE_STREAM_SECRET` | The secret the Stream proves itself with (its security token, and the header `x-stream-secret`). Unset, `POST /stream` refuses every delivery and the feed is read from the chain alone |
+| `QUICKNODE_API_KEY` | Only for `pnpm stream`: a QuickNode API key with the Streams permission |
+| `FEED_RPC_MS`, `FEED_GRACE_MS`, `FEED_START_BLOCK` | The keeper's own read of the vault's logs: how often (2000), how long a log waits for the Stream first (4000), and where the first read starts (default: the vault's first block, found by itself) |
 | `USDC_ADDRESS`, `GEMINI_BASE` | Defaults: Arc testnet USDC, `https://api.gemini.com` |
 | `PORT`, `KEEPER_LOOP_MS`, `KEEPER_RETRY_MS`, `KEEPER_DATA_DIR` | Defaults: 8787, 30000, 600000, `./data` |
 | `SPREAD_BPS`, `MAX_LOCKED_BPS`, `EXPOSURE_HEADROOM_BPS`, `LOADING_BPS_PER_STEP` | Pricing settings. Defaults: 500, 6000, 9000, 0 |
@@ -42,13 +46,18 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 
 | Route | What it does |
 |---|---|
-| `GET /health` | The vault, the three service addresses, the latest block, and the commit the hosted build was made from |
+| `GET /health` | The vault, the three service addresses, the latest block, the commit the hosted build was made from, and `stream`: deliveries so far, how many carried QuickNode's signature, when the last one came, how many events the feed holds and how many of them the Stream delivered |
 | `GET /health/rpc` | Whether each RPC endpoint answers, and how fast |
 | `GET /games?league=nba` | One league's games that have not started, soonest first: `eventTicker`, `game` ("Cavaliers at Heat"), `startTime`, and for each team its `instrumentSymbol`, `team`, `condition` ("the Heat win"), `chance` and `quotable`. `leagues` lists the leagues (`nfl`, `nba`, `nhl`, `ncaaf`, `ncaam`) |
 | `GET /price?eventTicker=&instrumentSymbol=&payoutPerClaim=&maxClaims=&claimDeadline=` | The price of a promo, unsigned. `breakdown` has `chance`, `mostOwed`, `fee` and `cost`; `maxCustomers` is the most the vault can cover right now; `limit` is `ok` or the limit the request is over; `display` has the words for the card (`game`, `team`, `subject`, `condition`, `league`, `startTime`) and `rule` is Gemini's rule for the result |
 | `POST /quote` | Body: the same fields plus `merchant` (and `hedgeMode`, and `item` and `business` for the promo's card). Returns the price plus `quote` and `signature` for `createPromo(quote, signature)`. Good for 90 seconds, for that merchant only. Answers 422 with a reason when the vault cannot take the promo |
 | `POST /claims` | Body: `promoId`, `customer`, `userToken` (the customer's Circle login token from the web app). The keeper asks Circle whose token it is, then registers the customer on chain. 401 `login` when Circle does not know the token (it lasts an hour), 403 `not-your-wallet` when `customer` is not one of that user's wallets on Arc, 409 `already-claimed` when that user has claimed this promo with another wallet, 502 `failed` when Circle or the chain cannot be reached. A repeated claim answers 200 with `alreadyRegistered: true` and sends nothing. The test loop sends `testUser` (any name) in place of `userToken`, with the header `X-Test-Key: <CLAIM_TEST_KEY>` |
-| `GET /promos/:id` | The promo as the chain has it, with the event and result names behind its two hashes, the words for the card, `item` and `business`, and `txs`: the transactions the keeper sent for it. With `?customer=0x...` it adds `customer`: that address's place in line, and whether it has been paid |
+| `GET /promos/:id` | The promo as the chain has it, with the event and result names behind its two hashes, the words for the card, `item` and `business`, `events` (the promo's events on the vault, oldest first, each with `via`: `stream` or `rpc`), `stream` (the Stream's deliveries so far and the time of the last) and `txs` (the transactions the keeper sent for it). With `?customer=0x...` it adds `customer`: that address's place in line, and whether it has been paid. The chain is read once a second per promo at most, however many pages ask |
+| `GET /promos/:id/events` | Server-sent events: each new event on the promo as a `vault` message, the moment the keeper has it. The pages keep this open |
+| `GET /events` | The same for every event on the vault |
+| `GET /feed?limit=100` | The newest events of every kind, oldest first, and the Stream's record |
+| `POST /stream` | The QuickNode Stream's webhook. Takes a delivery with QuickNode's signature or with the secret header; answers 401 to anything else |
+| `GET /vault` | The vault as a liquidity provider reads it: `balance`, `locked`, `pending` (the locks of promos with no final result), `free` (what a withdrawal is priced on), `depositBasis` (what a deposit is priced on), `totalShares`, the two limits, `netEarned`, every promo with what it locks and what it made, and the newest events. One read of the chain, shared for two seconds |
 | `GET /intervals?series=BTC05M` | The next windows of a 5 or 15-minute crypto market (the test loop) |
 
 `claimDeadline` is `start` (the default: the promo takes customers until the event starts), `30min` (until 30 minutes before) or a unix time no later than the start.
@@ -58,6 +67,32 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 - Gemini lists every market of a game as its own event, and a page of 100 events is 3 to 12 MB. The keeper asks one league at a time with Gemini's `search` filter, keeps the events whose ticker ends in `-M` (the game's winner), and holds each league's list in memory. A list older than two minutes is served as it is while a new one is read, so only the first read after a start waits for Gemini; the keeper does that read itself when it starts.
 - A team can be picked when it has both a bid and an ask and is not too likely. An empty book shows an ask of 0.02 with no bid; that is not a 2% chance.
 - Names come from Gemini, never from the merchant: a pro team goes by its nickname ("Miami" with the participant "Miami Heat" is "the Heat"), a college by its own name. What a merchant does send, with the quote request, is what is free and the shop's name (`item`, `business`, 40 characters each). They are tied to the promo the first time it is read: a promo can only carry a quote's exact merchant, amounts and deadline if the pricer signed that quote.
+
+## The feed: a QuickNode Stream, and the chain behind it
+
+The promo page and the customer's card change when something happens on the vault: a customer is covered, a result is posted, a payout is sent. Those are the vault's events, and they reach the keeper two ways.
+
+**The Stream** (`pnpm stream on` makes it; its settings are in `scripts/stream.ts`):
+
+| | |
+|---|---|
+| Network | Arc Testnet (`arc-testnet`) |
+| Dataset | `logs` |
+| Filter | [`stream/filter.js`](stream/filter.js). It keeps the logs whose address is the vault and whose first topic is one of eleven events (`PromoCreated`, `ClaimRegistered`, `Settled`, `Vetoed`, `SettlementReset`, `Finalized`, `Voided`, `Paid`, `PayoutFailed`, `Deposited`, `Withdrawn`), names each one, and adds its promo id and the account it is about. A block with none returns `null`, so nothing is delivered for it |
+| Destination | Webhook: `POST https://freeif-production.up.railway.app/stream`, no compression, three retries one second apart |
+| Proof of origin | QuickNode signs each delivery with the Stream's security token (HMAC-SHA256 of nonce + timestamp + body); the Stream also sends the same secret in the header `x-stream-secret`. The keeper takes a delivery with either |
+
+Why a Stream: the pages should change within about a second of the block, for every viewer, without each browser asking the chain. One delivery reaches the keeper and the keeper pushes it to every open page. The same delivery also starts work: a `Finalized` event with a "yes" wakes the settlement loop, so customers are paid right after the result is confirmed instead of on the next 30-second pass.
+
+**The keeper's own read.** Every two seconds the keeper asks the chain for the vault's logs since the last block it read. A log the Stream has already delivered is skipped. A log it has not delivered is left alone until it is four seconds old, then added as `rpc`. So the Stream gets to deliver first, a late or stopped Stream costs a few seconds and nothing else, and events from before the Stream existed are there too: on its first start the keeper finds the block the vault was deployed in (by bisection on `eth_getCode`) and reads forward from there, in ranges of 9,000 blocks (Arc's RPC refuses more than 10,000).
+
+Each event is kept with its block, its time, how it came (`via`) and when the keeper had it (`seenAt`), in the keeper's file. The mechanics view of the promo page shows both: "QuickNode Stream · 0.8 s after the block" or "RPC".
+
+The filter is tested as it runs: `test/stream.test.ts` loads `stream/filter.js`, runs it on real blocks of the deployed vault (`test/fixtures/vault-logs.json`), and checks every topic hash in it against the contract's ABI. `pnpm stream test` runs the same file at QuickNode on one block.
+
+A Stream is billed for every block it reads, whether the filter keeps anything or not, and a paused Stream resumes at the block it stopped at. So `pnpm stream off` pauses it when nothing is being shown, and `pnpm stream on` removes it and starts a new one at the newest block; the keeper's own read covers the gap.
+
+Status on Nov 13: the webhook, the feed, the keeper's own read and the pages are live, and every event so far came by `rpc`. The Stream itself has not been started yet.
 
 ## Pricing rules
 
@@ -95,6 +130,8 @@ Run one keeper per vault. A second one with the same keys does no harm to the va
 | `src/pricer.ts` | The pricing service: Gemini's ask, the vault's state, the signed quote |
 | `src/relayer.ts`, `src/circle.ts` | `registerClaim`, one claim per Circle user, and the question to Circle: whose login is this, and which wallets are theirs |
 | `src/keeper.ts` | The settlement loop |
+| `src/stream.ts` | The feed: decoding a delivery, the events kept, the keeper's own read of the chain |
+| `stream/filter.js`, `scripts/stream.ts` | The QuickNode Stream's filter, and the script that makes, tests, pauses and removes the Stream |
 | `src/server.ts`, `src/main.ts` | The HTTP API and the process |
-| `src/gemini.ts`, `src/chain.ts`, `src/store.ts`, `src/config.ts` | Gemini's API, Arc and the quote's EIP-712 types, the JSON file, settings |
+| `src/gemini.ts`, `src/chain.ts`, `src/store.ts`, `src/config.ts` | Gemini's API, Arc (its endpoints and which one is asked) and the quote's EIP-712 types, the JSON file, settings |
 | `src/abi.ts` | Generated from the contract build |

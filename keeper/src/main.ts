@@ -65,6 +65,8 @@ if (streamSecret === undefined) console.log("[feed] QUICKNODE_STREAM_SECRET is n
 const app = makeApp({
   client,
   vault,
+  usdc,
+  maxLockedBps: config.pricingParams().maxLockedBps,
   pricer,
   games,
   relayer,
