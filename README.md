@@ -19,7 +19,7 @@ cd contracts
 forge test
 ```
 
-Needs [Foundry](https://getfoundry.sh). Dependencies are git submodules: clone with `--recurse-submodules`, or run `git submodule update --init --recursive` after cloning.
+Needs [Foundry](https://getfoundry.sh). Dependencies are git submodules: run `git submodule update --init` after cloning.
 
 ## License
 
