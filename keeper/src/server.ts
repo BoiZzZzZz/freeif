@@ -7,6 +7,7 @@ import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { createPublicClient, erc20Abi, http, isAddress, type Address } from "viem";
 import { promoVaultAbi } from "./abi.ts";
 import { CHAIN_ID, rpcUrls } from "./config.ts";
@@ -15,6 +16,7 @@ import { LEAGUES, WEATHER, type Games } from "./games.ts";
 import type { Odds } from "./odds.ts";
 import { getEvent, priceToBps, upcomingIntervalTickers } from "./gemini.ts";
 import { cleanText, findLabel } from "./labels.ts";
+import { Gate, LIMITS, Limiter, type Limits } from "./limit.ts";
 import { Pricer, Refusal, type PriceRequest } from "./pricer.ts";
 import { ClaimRefusal, Relayer } from "./relayer.ts";
 import { sleep } from "./sleep.ts";
@@ -40,6 +42,10 @@ type Deps = {
   testKey?: string;
   /** The secret the QuickNode Stream sends with each delivery. Undefined refuses every delivery. */
   streamSecret?: string;
+  /** How much one client may ask (limit.ts). Tests pass smaller numbers. */
+  limits?: Limits;
+  /** The clock the limits are counted on (tests). */
+  now?: () => number;
 };
 
 class BadRequest extends Error {}
@@ -52,13 +58,38 @@ const PROMO_READ_MS = 1_000;
 const VAULT_READ_MS = 2_000;
 const VAULT_EVENTS = 60;
 const MAX_DELIVERY_BYTES = 2 * 1024 * 1024;
+/** Promo reads held at once before the ones that have run out are dropped. */
+const MAX_PROMO_READS = 500;
+
+/**
+ * The address a request came from, which is all that names a client of the open routes. Railway's proxy
+ * puts it in `X-Real-IP`; a keeper with no proxy in front of it reads the connection itself.
+ */
+function clientOf(c: Context): string {
+  const real = c.req.header("x-real-ip")?.trim();
+  if (real) return real;
+  try {
+    return getConnInfo(c).remote.address ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function tooMany(c: Context, seconds: number): Response {
+  c.header("Retry-After", String(seconds));
+  return c.json({ error: { code: "too-many", message: "That's a lot of requests at once. Try again in a minute." } }, 429);
+}
 
 /**
  * Server-sent events: each vault event that `wanted` accepts, the moment it reaches the feed. The page
  * reads the promo again when one arrives, so an event that is missed while the connection is down costs
  * nothing: the page also reads the promo when the connection comes back.
  */
-function eventStream(c: Context, feed: Feed, wanted: (event: FeedEvent) => boolean): Response {
+function eventStream(c: Context, feed: Feed, gate: Gate, wanted: (event: FeedEvent) => boolean): Response {
+  // A stream is a connection held open, so they are counted while they are open. A page that is
+  // refused one still reads the promo on its timer, and asks for the stream again.
+  const leave = gate.enter(clientOf(c));
+  if (leave === null) return tooMany(c, 30);
   // Tells a proxy in front of the keeper to pass each line on as it is written.
   c.header("X-Accel-Buffering", "no");
   return streamSSE(c, async (stream) => {
@@ -72,6 +103,7 @@ function eventStream(c: Context, feed: Feed, wanted: (event: FeedEvent) => boole
     });
     stream.onAbort(() => {
       open = false;
+      leave();
       wake?.();
     });
     try {
@@ -87,6 +119,7 @@ function eventStream(c: Context, feed: Feed, wanted: (event: FeedEvent) => boole
       }
     } finally {
       stop();
+      leave();
     }
   });
 }
@@ -152,6 +185,28 @@ function parsePriceRequest(input: Record<string, unknown>): PriceRequest {
 export function makeApp(d: Deps): Hono {
   const app = new Hono();
   app.use("*", cors());
+
+  // The limits come after CORS, so that a page can read a refusal. `/health` is left out because the web
+  // app's own server asks it for the vault's address, and the webhook because it has its own proof.
+  const limits = d.limits ?? LIMITS;
+  const limiter = new Limiter(d.now);
+  const streams = new Gate(limits.streams.perClient, limits.streams.inAll);
+  app.use("*", async (c, next) => {
+    const path = c.req.path;
+    if (path === "/health" || path === "/stream") return next();
+    const post = c.req.method === "POST";
+    const own =
+      path === "/quote" && post ? limits.quote
+      : path === "/claims" && post ? limits.claims
+      : path === "/price" ? limits.price
+      : path === "/intervals" ? limits.intervals
+      : path === "/health/rpc" ? limits.rpc
+      : null;
+    const who = clientOf(c);
+    const wait = limiter.take(limits.all, who) || (own === null ? 0 : limiter.take(own, who));
+    if (wait > 0) return tooMany(c, wait);
+    return next();
+  });
 
   app.onError((err, c) => {
     if (err instanceof Refusal) {
@@ -219,7 +274,7 @@ export function makeApp(d: Deps): Hono {
   });
 
   // Every vault event as it happens, as server-sent events. `/promos/:id/events` is one promo's.
-  app.get("/events", (c) => eventStream(c, d.feed, () => true));
+  app.get("/events", (c) => eventStream(c, d.feed, streams, () => true));
 
   // The newest vault events of every kind, oldest first, and the Stream's record.
   app.get("/feed", (c) => {
@@ -322,6 +377,10 @@ export function makeApp(d: Deps): Hono {
     const held = reads.get(key);
     if (held && Date.now() - held.at < PROMO_READ_MS) return held.value;
     const value = readChain(id);
+    // Ids nobody asks about again would otherwise stay for good.
+    if (reads.size >= MAX_PROMO_READS) {
+      for (const [k, read] of reads) if (Date.now() - read.at >= PROMO_READ_MS) reads.delete(k);
+    }
     reads.set(key, { at: Date.now(), value });
     // A read that failed is not served again.
     value.catch(() => {
@@ -460,7 +519,7 @@ export function makeApp(d: Deps): Hono {
   app.get("/promos/:id/events", (c) => {
     const id = c.req.param("id");
     if (!/^\d+$/.test(id)) throw new BadRequest("promo id must be a whole number");
-    return eventStream(c, d.feed, (event) => event.promoId === id);
+    return eventStream(c, d.feed, streams, (event) => event.promoId === id);
   });
 
   // How a promo's chance has moved since it started: the keeper's readings of Gemini's book, oldest

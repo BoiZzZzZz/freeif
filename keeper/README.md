@@ -67,6 +67,22 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 
 `claimDeadline` is `start` (the default: the promo takes customers until the event starts), `30min` (until 30 minutes before) or a unix time no later than the start. The start is kickoff for a game. A daily temperature market has no start time on Gemini: its day is taken to begin 24 hours before the market closes (it closes at 04:59:59 UTC, the end of the day in Eastern time), and nothing is sold on it after that, because from then on the high is being measured.
 
+### Limits
+
+None of these routes needs a login, so a client is the address its request came from (Railway's proxy puts it in `X-Real-IP`). Each address has an allowance per route that is handed back evenly: a quiet client may send a minute's worth at once and is then held to the rate. Past it the answer is 429 with `Retry-After` in seconds and `{ "error": { "code": "too-many", ... } }`.
+
+| What | Per address |
+|---|---|
+| Every route but `GET /health` and `POST /stream` | 600 a minute |
+| `GET /price` (a read of Gemini's book each) | 120 a minute |
+| `POST /quote` (a signed quote holds its room in the vault for 90 seconds) | 10 a minute |
+| `POST /claims` (two calls to Circle and a transaction each) | 30 a minute |
+| `GET /intervals` (four reads of Gemini each) | 20 a minute |
+| `GET /health/rpc` | 6 a minute |
+| Event streams open at once (`/events`, `/promos/:id/events`) | 60, and 1,000 in all |
+
+The numbers are set for a room of people behind one address to pass (a page that shows a promo asks about six times a minute, a merchant form four) and for a loop to stop. They do not stop someone who comes from many addresses, and they do not stop one address from holding the vault's room: a single signed quote at the most the vault can take keeps that room for its 90 seconds. `GET /health` is left out because the web app's own server asks it for the vault's address; the webhook has its own proof. The numbers are `LIMITS` in `src/limit.ts`.
+
 ## The game list and the words on the card
 
 - Gemini lists every market of a game as its own event, and a page of 100 events is 3 to 12 MB. The keeper asks one league at a time with Gemini's `search` filter, keeps the events whose ticker ends in `-M` (the game's winner), and holds each league's list in memory. A list older than two minutes is served as it is while a new one is read, so only the first read after a start waits for Gemini; the keeper does that read itself when it starts.
@@ -168,5 +184,6 @@ Run one keeper per vault. A second one with the same keys does no harm to the va
 | `src/stream.ts` | The feed: decoding a delivery, the events kept, the keeper's own read of the chain |
 | `stream/filter.js`, `scripts/stream.ts` | The QuickNode Stream's filter, and the script that makes, tests, pauses and removes the Stream |
 | `src/server.ts`, `src/main.ts` | The HTTP API and the process |
+| `src/limit.ts` | How much one address may ask of the open routes, and how many event streams may be open |
 | `src/gemini.ts`, `src/chain.ts`, `src/store.ts`, `src/config.ts` | Gemini's API, Arc (its endpoints and which one is asked) and the quote's EIP-712 types, the JSON file, settings |
 | `src/abi.ts` | Generated from the contract build |
