@@ -138,6 +138,11 @@ contract PromoVault is EIP712 {
     error HedgeNeedsOneClaim(uint32 maxClaims);
     error PremiumAboveMaxPayout(uint256 premium, uint256 maxPayout);
     error ExposureTooHigh(uint256 vaultRisk, uint256 cap);
+    error NotClaimSigner();
+    error WrongStatus(Status status);
+    error ClaimsClosed(uint64 claimDeadline);
+    error PromoFull(uint32 maxClaims);
+    error AlreadyClaimed(address customer);
 
     // ---------------------------------------------------------------- setup
 
@@ -307,6 +312,26 @@ contract PromoVault is EIP712 {
         if (q.hedgeMode) emit ClaimRegistered(promoId, q.merchant, 1);
 
         usdc.safeTransferFrom(msg.sender, address(this), q.premium);
+    }
+
+    /// @notice Register a customer for a promo. Only the promo's claim signer (the relayer named
+    ///         in the quote) may call this; the merchant and the owner cannot.
+    /// @dev In hedge mode the one claim is taken at creation, so this always reverts.
+    function registerClaim(uint256 promoId, address customer) external whenNotPaused {
+        Promo storage p = _promo(promoId);
+        if (msg.sender != p.claimSigner) revert NotClaimSigner();
+        if (p.status != Status.Open) revert WrongStatus(p.status);
+        if (block.timestamp >= p.claimDeadline) revert ClaimsClosed(p.claimDeadline);
+        if (p.claimCount >= p.maxClaims) revert PromoFull(p.maxClaims);
+        if (customer == address(0)) revert ZeroAddress();
+        if (hasClaim[promoId][customer]) revert AlreadyClaimed(customer);
+
+        uint32 count = p.claimCount + 1;
+        p.claimCount = count;
+        hasClaim[promoId][customer] = true;
+        claimants[promoId].push(customer);
+
+        emit ClaimRegistered(promoId, customer, count);
     }
 
     // ---------------------------------------------------------------- admin
