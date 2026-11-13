@@ -6,6 +6,7 @@ import Link from "next/link";
 import { QRCodeCanvas, QRCodeSVG } from "qrcode.react";
 import { useRef, useState, useSyncExternalStore } from "react";
 import { SiteFooter, useMechanics } from "@/components/mechanics";
+import { OddsChart } from "@/components/odds-chart";
 import { Button } from "@/components/ui/button";
 import { explorerAddress, explorerTx, KEEPER_URL } from "@/lib/config";
 import { dayTime, timeOf, usd } from "@/lib/format";
@@ -13,6 +14,7 @@ import type { Promo } from "@/lib/keeper";
 import { KEYS, NO_PROMOS, useLocal, type MyPromo } from "@/lib/local";
 import { feedLines, promoTitle, statusLine, takingCustomers } from "@/lib/promo";
 import { useNow } from "@/lib/use-now";
+import { useOdds } from "@/lib/use-odds";
 import { usePromo } from "@/lib/use-promo";
 import { useWallet } from "@/lib/wallet";
 
@@ -33,6 +35,8 @@ export function PromoView({ id }: { id: string }) {
   const mine = useLocal<MyPromo[]>(KEYS.promos, NO_PROMOS);
   const mechanics = useMechanics();
   const { promo, missing } = usePromo(id);
+  // The chance is read again while the promo has no result. Until the promo is known, nothing is polled.
+  const odds = useOdds(id, promo?.status === "Open");
   const now = Math.floor(useNow(5000) / 1000);
 
   if (missing) {
@@ -141,6 +145,8 @@ export function PromoView({ id }: { id: string }) {
           )}
         </ul>
       </section>
+
+      <OddsChart promo={promo} odds={odds} merchant={merchant} mechanics={mechanics} />
 
       <Proof promo={promo} open={mechanics} />
     </Frame>

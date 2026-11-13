@@ -6,9 +6,9 @@ The FreeIf app: Next.js 16 (App Router), React 19, Tailwind 4, viem, `qrcode.rea
 |---|---|
 | `/merchant` | A shop owner sets up a promo: a game and a team, what is free, how many customers, the live cost, Pay |
 | `/claim/[promoId]` | A customer at the counter scans the code, types an email and a 6-digit code, and is covered |
-| `/promo/[id]` | The merchant's dashboard and the public status page: one status sentence, three numbers, the counter code, a live feed, proof |
+| `/promo/[id]` | The merchant's dashboard and the public status page: one status sentence, three numbers, the counter code, a live feed, a chart of how the chance has moved since the promo started, proof |
 | `/promo/[id]/print` | The counter sign with the code, printed from the browser |
-| `/lp` | A liquidity provider: what the vault holds, how much of it is locked, what it has earned, both share prices, deposit and withdraw, every promo with what it locks and what it made, the risks, and the vault's activity |
+| `/lp` | A liquidity provider: what the vault holds, how much of it is locked, what it has earned, both share prices, deposit and withdraw, every promo with what it locks and what it made, each open promo's chance now, the risks, and the vault's activity |
 
 Merchant and customer screens never say prediction market, USDC, wallet or gas. `/lp` is the one page that does, and the one page that uses a browser wallet (MetaMask and the like) instead of the email login. The footer link "See how it works under the hood" (or `?mechanics=1` in a link) turns on the mechanics view, which shows where each number comes from.
 
@@ -16,6 +16,7 @@ Merchant and customer screens never say prediction market, USDC, wallet or gas. 
 
 - **The keeper** (`../keeper`, API in its README) is called from the browser: the game list, the live price, the signed quote, the claim (with the customer's login token, which the keeper checks with Circle), and the promo's status. Names such as "the Lions win" come from the keeper, built from Gemini's data.
 - **Live pages.** `/promo/[id]` and `/claim/[promoId]` keep the keeper's event stream open (`GET /promos/:id/events`, server-sent events). When an event on the promo reaches the keeper, from the QuickNode Stream or from the keeper's own read of the chain, its line is on the page at once and the page reads the promo again (three reads: at once, after 1.5 seconds, after 5). A timer reads the promo as well, every 15 seconds while the stream is open and every 4 while it is not, so a dropped connection costs seconds. A browser gives up on an event stream whose reconnect is answered with an error, which is what a keeper restart looks like, so the page opens a new one three seconds later (`src/lib/events.ts`). The feed is the promo's events on the vault; in the mechanics view each line says how the event reached the keeper and how long after its block.
+- **The chart.** `/promo/[id]` draws the keeper's readings of the result's price on Gemini (`GET /promos/:id/odds`): one line on a 0 to 100% scale, from the moment the promo started to the newest reading, with a dot at the price the promo was sold at and a tick at kickoff. The first read takes every reading; while the promo has no result, a read every 30 seconds asks only for the new ones. Pointing at the line, or the arrow keys, reads one point; in the mechanics view that adds the bid and the ask, and a link to the readings as the keeper has them. It is drawn by hand as HTML and one SVG path (`src/components/odds-chart.tsx`), with no chart library.
 - **Circle** is called from this app's server, because those calls need the API key. Everything a user does is a "challenge": a route under `/api/wallet` asks Circle for one with the user's token, and Circle's SDK in the browser shows its own window for it.
 
 | Route | What it does |
@@ -74,6 +75,7 @@ On Vercel the two Circle values are project variables. On a developer machine th
 | `src/lib/keeper.ts` | The keeper's API and its types |
 | `src/lib/use-promo.ts` | One promo, kept current: the keeper's event stream, and the timer behind it |
 | `src/lib/events.ts` | The keeper's event stream in the browser, reopened by itself after the keeper restarts |
+| `src/components/odds-chart.tsx`, `src/lib/use-odds.ts` | The chart on the promo page, and the readings behind it |
 | `src/lib/promo.ts`, `format.ts` | A promo in words; money and times as people read them |
 | `src/lib/server/` | Circle's API, the chain reads, the permit and the promo call |
 | `src/lib/abi.ts` | Copied from the keeper |
@@ -82,6 +84,6 @@ On Vercel the two Circle values are project variables. On a developer machine th
 
 - The `/api/wallet` routes have no rate limit, and `email-token` sends an email to any address it is given.
 - The claim page sends the customer's login token to the keeper with the claim, and the keeper asks Circle whose it is: one claim per login per promo, for that login's own account. The token is a credential for an hour; it goes to the keeper over HTTPS and is not stored there.
-- Buttons, inputs and the bottom sheet are written by hand, not taken from a component library. The sheet does not trap focus on purpose: Circle's window is an iframe on the page and has to sit above it.
+- Buttons, inputs, the bottom sheet and the chart are written by hand, not taken from a component library. The sheet does not trap focus on purpose: Circle's window is an iframe on the page and has to sit above it.
 - A login lasts one hour (Circle's user token). After that the app asks for the email again.
 - Cash out shows the balance and says it is coming; it does not send money yet.

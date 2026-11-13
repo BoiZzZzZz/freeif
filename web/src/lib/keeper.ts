@@ -174,6 +174,25 @@ export type Promo = {
   customer: { address: string; number: number | null; paid: boolean; owed: string } | null;
 };
 
+/**
+ * One reading of a result's price on Gemini: unix seconds, the chance of "yes", the best bid and the best
+ * ask. The three prices are basis points of a dollar: 4100 is 0.41, a 41% chance.
+ */
+export type OddsPoint = [t: number, chance: number, bid: number | null, ask: number | null];
+
+/** How a promo's chance has moved since it started (`GET /promos/:id/odds`). */
+export type Odds = {
+  promoId: string;
+  /** How often the keeper takes a reading. */
+  everySeconds: number;
+  /** The reading the promo was priced on, at the time it started. Null on a promo from before readings were kept. */
+  start: OddsPoint | null;
+  /** The readings the keeper kept, oldest first. */
+  points: OddsPoint[];
+  /** The newest reading. */
+  latest: OddsPoint | null;
+};
+
 /** One promo as the vault's books have it (`GET /vault`). */
 export type VaultPromo = {
   promoId: string;
@@ -196,6 +215,8 @@ export type VaultPromo = {
   outcomeYes: boolean;
   /** What the vault made on it: the premium less what its customers get. Null until it has a final result. */
   net: string | null;
+  /** The chance of "yes" at the keeper's newest reading (0.41 is 41%). Null once the promo has a result, or with no reading. */
+  chance: number | null;
 };
 
 /** The vault as a liquidity provider reads it. Amounts are USDC base units; shares have six decimals too. */
@@ -298,6 +319,10 @@ export const keeper = {
 
   /** The vault's books, every promo, and the newest events: the page for liquidity providers. */
   vault: (signal?: AbortSignal) => call<Vault>("/vault", undefined, signal),
+
+  /** A promo's readings. With `after`, only the ones later than that time. */
+  odds: (id: string, after = 0, signal?: AbortSignal) =>
+    call<Odds>(`/promos/${encodeURIComponent(id)}/odds${after > 0 ? `?after=${after}` : ""}`, undefined, signal),
 
   promo: (id: string, customer?: string | null, signal?: AbortSignal) =>
     call<Promo>(`/promos/${encodeURIComponent(id)}${customer ? `?customer=${customer}` : ""}`, undefined, signal),

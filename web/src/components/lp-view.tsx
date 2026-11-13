@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { explorerAddress, explorerTx, FEE_BUFFER } from "@/lib/config";
 import { follow } from "@/lib/events";
-import { dayTime, parseDollars, shortAddress, usd } from "@/lib/format";
+import { dayTime, parseDollars, pct, shortAddress, usd } from "@/lib/format";
 import { connect, connected, deposit, injected, onAccount, position, withdraw, type Position } from "@/lib/injected";
 import { keeper, type FeedEvent, type Vault, type VaultPromo } from "@/lib/keeper";
 import { useNow } from "@/lib/use-now";
@@ -197,13 +197,15 @@ export function LpView() {
         {open.length === 0 ? (
           <Empty>No promo is open. Nothing is locked.</Empty>
         ) : (
-          <Table head={["Promo", "Locked", "Premium", "Break-even", "State"]}>
+          <Table head={["Promo", "Locked", "Premium", "Chance / break‑even", "State"]}>
             {open.map((p) => (
               <Row key={p.promoId} id={p.promoId} name={promoName(p)}>
                 <Cell label="Locked">{usd(p.locked)}</Cell>
                 <Cell label="Premium">{usd(p.premium)}</Cell>
-                {/* The chance of "yes" at which the premium exactly pays for the payout. */}
-                <Cell label="Break-even">{percent(big(p.premium), big(p.maxPayout))}</Cell>
+                {/* The chance of "yes" now, from Gemini's ask, next to the chance at which the premium exactly pays for the payout. */}
+                <Cell label="Chance / break‑even">
+                  {p.chance === null ? "–" : pct(p.chance)} / {percent(big(p.premium), big(p.maxPayout))}
+                </Cell>
                 <Cell label="State">{openState(p, now)}</Cell>
               </Row>
             ))}
@@ -288,7 +290,7 @@ const Empty = ({ children }: { children: React.ReactNode }) => (
   <p className="rounded-[10px] border border-line bg-card px-4 py-3 text-[15px] text-ink/60">{children}</p>
 );
 
-const COLUMNS = "md:grid md:grid-cols-[minmax(0,1fr)_96px_96px_96px_150px] md:items-baseline md:gap-3";
+const COLUMNS = "md:grid md:grid-cols-[minmax(0,1fr)_96px_96px_128px_150px] md:items-baseline md:gap-3";
 
 /** A table on a wide screen; under 768px each row is a small card with its labels. */
 function Table({ head, children }: { head: string[]; children: React.ReactNode }) {
