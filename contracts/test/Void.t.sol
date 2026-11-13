@@ -182,7 +182,8 @@ contract VoidPromoTest is SettlementBase {
         uint32 maxClaims,
         uint256 premium
     ) public {
-        payoutPerClaim = bound(payoutPerClaim, 1, 100 * USDC);
+        // At most $9,000 locked: the vault has $9,880 free with the base promo open.
+        payoutPerClaim = bound(payoutPerClaim, 1, 90 * USDC);
         maxClaims = uint32(bound(maxClaims, 1, 100));
         uint256 maxPayout = payoutPerClaim * maxClaims;
         premium = bound(premium, 0, maxPayout);

@@ -125,6 +125,7 @@ contract PromoVault is EIP712 {
     event SettlementReset(uint256 indexed promoId);
     event Finalized(uint256 indexed promoId, bool outcomeYes, uint256 collateralReleased);
     event Voided(uint256 indexed promoId, address indexed merchant, uint256 premiumRefunded);
+    event Paid(uint256 indexed promoId, address indexed customer, uint256 amount);
     event PricerSet(address indexed pricer);
     event OracleSet(address indexed oracle);
     event MaxExposureBpsSet(uint16 bps);
@@ -456,6 +457,35 @@ contract PromoVault is EIP712 {
 
         emit Voided(promoId, promoMerchant, refund);
         usdc.safeTransfer(promoMerchant, refund);
+    }
+
+    /// @notice Pay the next `count` registered customers of a promo that finalized "yes". Anyone
+    ///         may call; the keeper calls it in batches of 50.
+    /// @dev Customers are paid in registration order, payoutPerClaim each, out of the promo's lock.
+    ///      A count above what is left pays what is left. The promo is PaidOut after the last one.
+    /// @return paid How many customers this call paid.
+    function payoutBatch(uint256 promoId, uint32 count) external returns (uint32 paid) {
+        Promo storage p = _promo(promoId);
+        if (p.status != Status.FinalizedYes) revert WrongStatus(p.status);
+        if (count == 0) revert ZeroAmount();
+
+        uint32 start = p.paidCount;
+        uint32 remaining = p.claimCount - start;
+        paid = count < remaining ? count : remaining;
+        uint32 end = start + paid;
+        uint256 amount = p.payoutPerClaim;
+
+        p.paidCount = end;
+        p.collateralLocked -= amount * paid;
+        lockedCollateral -= amount * paid;
+        if (end == p.claimCount) p.status = Status.PaidOut;
+
+        address[] storage list = claimants[promoId];
+        for (uint32 i = start; i < end; i++) {
+            address customer = list[i];
+            emit Paid(promoId, customer, amount);
+            usdc.safeTransfer(customer, amount);
+        }
     }
 
     /// @dev The first moment a settled promo can be finalized, and the first moment a veto is
