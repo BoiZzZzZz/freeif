@@ -83,7 +83,18 @@ contract PromoVault {
 
     event Deposited(address indexed lp, uint256 amount, uint256 sharesMinted);
     event Withdrawn(address indexed lp, uint256 sharesBurned, uint256 amount);
+    event PricerSet(address indexed pricer);
+    event OracleSet(address indexed oracle);
+    event MaxExposureBpsSet(uint16 bps);
+    event DisputeWindowSet(uint32 window);
+    event VoidGraceSet(uint32 grace);
+    event Paused(address indexed by);
+    event Unpaused(address indexed by);
 
+    error NotOwner();
+    error ZeroAddress();
+    error ExposureCapTooHigh(uint16 bps);
+    error VaultPaused();
     error ZeroAmount();
     error FirstDepositTooSmall(uint256 amount, uint256 minimum);
     error ZeroShares();
@@ -91,7 +102,22 @@ contract PromoVault {
 
     // ---------------------------------------------------------------- setup
 
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
+    }
+
+    /// @dev Only on the functions that take new money or new risk. Withdrawals, settlement and
+    ///      every payout path stay open, so a pause cannot trap funds.
+    modifier whenNotPaused() {
+        if (paused) revert VaultPaused();
+        _;
+    }
+
     constructor(IERC20 usdc_, address pricer_, address oracle_) {
+        if (address(usdc_) == address(0) || pricer_ == address(0) || oracle_ == address(0)) {
+            revert ZeroAddress();
+        }
         usdc = usdc_;
         owner = msg.sender;
         pricer = pricer_;
@@ -120,7 +146,7 @@ contract PromoVault {
     /// @notice Deposit USDC and receive shares of the free balance.
     /// @param amount USDC base units. The caller must have approved the vault for it.
     /// @return sharesMinted Shares credited to the caller.
-    function deposit(uint256 amount) external returns (uint256 sharesMinted) {
+    function deposit(uint256 amount) external whenNotPaused returns (uint256 sharesMinted) {
         if (amount == 0) revert ZeroAmount();
 
         if (totalShares == 0) {
@@ -160,5 +186,51 @@ contract PromoVault {
 
         usdc.safeTransfer(msg.sender, amount);
         emit Withdrawn(msg.sender, shareAmount, amount);
+    }
+
+    // ---------------------------------------------------------------- admin
+
+    /// @notice Change the key that signs quotes. Quotes signed by the old key stop working.
+    function setPricer(address pricer_) external onlyOwner {
+        if (pricer_ == address(0)) revert ZeroAddress();
+        pricer = pricer_;
+        emit PricerSet(pricer_);
+    }
+
+    function setOracle(address oracle_) external onlyOwner {
+        if (oracle_ == address(0)) revert ZeroAddress();
+        oracle = oracle_;
+        emit OracleSet(oracle_);
+    }
+
+    /// @notice Share of the free balance one promo may put at risk, in basis points.
+    /// @dev Never above 100%: createPromo relies on vaultRisk <= freeBalance to keep the vault's
+    ///      balance at or above lockedCollateral.
+    function setMaxExposureBps(uint16 bps) external onlyOwner {
+        if (bps > 10_000) revert ExposureCapTooHigh(bps);
+        maxExposureBps = bps;
+        emit MaxExposureBpsSet(bps);
+    }
+
+    /// @notice Seconds between settle and finalize. Applies to promos already settled as well.
+    function setDisputeWindow(uint32 window) external onlyOwner {
+        disputeWindow = window;
+        emit DisputeWindowSet(window);
+    }
+
+    function setVoidGrace(uint32 grace) external onlyOwner {
+        voidGrace = grace;
+        emit VoidGraceSet(grace);
+    }
+
+    /// @notice Stop new deposits, new promos and new claims. Nothing else is affected.
+    function pause() external onlyOwner {
+        paused = true;
+        emit Paused(msg.sender);
+    }
+
+    function unpause() external onlyOwner {
+        paused = false;
+        emit Unpaused(msg.sender);
     }
 }
