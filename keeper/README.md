@@ -156,7 +156,7 @@ A promo costs what its hedge would cost on Gemini right now, plus a spread. A "y
 
 ## The test loop
 
-`scripts/e2e.ts` plays a merchant and three customers against a running keeper, on the next 5-minute BTC market: price, signed quote (with the test key), `createPromoWithPermit`, three relayed claims, then it waits for the keeper to settle, finalize and pay, and prints every transaction. About half the runs end "no" (nobody is paid); run it again for a "yes".
+`scripts/e2e.ts` plays a merchant and three customers against a running keeper, on the next 5-minute BTC market: price, signed quote (with the test key), `createPromoWithPermit`, three relayed claims, then it waits for the keeper to settle, finalize and pay, and prints every transaction. It reads the vault's dispute window and waits that long after the result, so on the deployed vault (one hour) a run takes a little over an hour. About half the runs end "no" (nobody is paid); run it again for a "yes".
 
 ```
 KEEPER_LOOP_MS=5000 pnpm start     # one terminal

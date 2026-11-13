@@ -84,7 +84,7 @@ flowchart TB
 | Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
 | First payout | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
 | So far (Nov 13) | 22 promos created. 19 have run to their end: 9 paid their customers, 10 ended "no". Three are open: two on Sunday's Patriots at Lions game and one on Saturday's high in Austin |
-| Settings on the vault (Nov 13) | `maxExposureBps` 2000 (20%). `disputeWindow` 30 seconds and `voidGrace` 60 seconds, which are test values: the contract's defaults are one hour and 7 days. The owner is one account, the deployer |
+| Settings on the vault | `maxExposureBps` 2000 (20%), `disputeWindow` one hour, `voidGrace` 7 days: the contract's defaults. Promos 0 to 22 ran with test values (30 seconds and 60 seconds) until Nov 13, 21:24 UTC. The owner is one account, the deployer |
 | Demo video | Added with the submission |
 
 ## Economic design

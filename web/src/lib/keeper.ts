@@ -24,17 +24,6 @@ export type Game = { eventTicker: string; game: string; startTime: number; teams
 
 export type GamesReply = { leagues?: League[]; league: string; games: Game[]; fetchedAt: number };
 
-/** One window of a 5-minute crypto market, from the keeper's test-loop helper. */
-export type IntervalWindow = {
-  eventTicker: string;
-  eventTitle: string;
-  instrumentSymbol: string;
-  /** Unix seconds. */
-  closeTime: number;
-  bestAsk: string | null;
-  quotable: boolean;
-};
-
 /** The words for the card, built by the keeper from Gemini's teams. */
 export type Display = {
   game: string;
@@ -310,22 +299,12 @@ export const isOutage = (err: unknown): boolean => !(err instanceof KeeperError)
 
 const UNREACHABLE = "We can't reach FreeIf right now. Try again in a moment.";
 
-/**
- * The keeper's test key, when the page was opened with `?dev=<key>`. The keeper signs a quote on a
- * 5-minute test market only for a request that carries it.
- */
-function testKey(): Record<string, string> {
-  if (typeof window === "undefined") return {};
-  const dev = new URLSearchParams(window.location.search).get("dev");
-  return dev && dev !== "1" ? { "X-Test-Key": dev } : {};
-}
-
-async function call<T>(path: string, body?: unknown, signal?: AbortSignal, headers: Record<string, string> = {}): Promise<T> {
+async function call<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${KEEPER_URL}${path}`, {
       method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? undefined : { "Content-Type": "application/json", ...headers },
+      headers: body === undefined ? undefined : { "Content-Type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal,
       cache: "no-store",
@@ -357,9 +336,6 @@ export const keeper = {
   games: (league?: string, signal?: AbortSignal) =>
     call<GamesReply>(`/games${league ? `?league=${encodeURIComponent(league)}` : ""}`, undefined, signal),
 
-  /** The next 5-minute BTC windows: the test loop, never offered to a merchant. */
-  intervals: (signal?: AbortSignal) => call<{ windows: IntervalWindow[] }>("/intervals?series=BTC05M", undefined, signal),
-
   /** The price of a promo, unsigned. Needs no login. */
   price: (req: PriceRequest, signal?: AbortSignal) => call<Price>(`/price?${query(req)}`, undefined, signal),
 
@@ -367,7 +343,7 @@ export const keeper = {
   weather: (signal?: AbortSignal) => call<GamesReply>("/weather", undefined, signal),
 
   /** A signed quote, good for 90 seconds, for this merchant only. `hedgeMode` pays the merchant itself. */
-  quote: (req: PriceRequest & { merchant: string; item: string; business: string; hedgeMode?: boolean }) => call<Quoted>("/quote", req, undefined, testKey()),
+  quote: (req: PriceRequest & { merchant: string; item: string; business: string; hedgeMode?: boolean }) => call<Quoted>("/quote", req),
 
   /** Covers `customer` on a promo. `userToken` is the login: the keeper asks Circle whose it is. */
   claim: (req: { promoId: string; customer: string; userToken: string }) => call<ClaimResult>("/claims", req),

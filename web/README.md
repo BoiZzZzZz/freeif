@@ -85,7 +85,7 @@ On Vercel the two Circle values are project variables. On a developer machine th
 
 `pnpm check:pay` plays the merchant with a plain test key (`TEST_MERCHANT_PK` in the secrets file) in place of the Circle wallet: a signed quote from the keeper, the permit, and the promo call, simulated on Arc, once for a promo on a game and once for a cover on a temperature market, and the cash-out transfer. It also checks that a short permit, an altered quote, an expired quote and a cover's quote sent as a customer promo are refused, and that cash out refuses more than the balance, the account's own address, something that is not an address, and the token's address.
 
-The test loop in the browser: `/merchant?dev=1` adds a tab, "Crypto 5-min", with 5-minute BTC markets, which settle in minutes where a game takes hours, and shows their prices. The keeper signs a quote on those markets only for a request with its test key, so Pay on that tab is refused ("This market is for testing only.") unless the page was opened with `?dev=<CLAIM_TEST_KEY>`: then the quote request carries the key as `X-Test-Key` (`src/lib/keeper.ts`). Without `?dev=` the tab is not shown.
+The site lists games and temperatures only. The 5-minute BTC markets, which settle in minutes where a game takes hours, are the keeper's test loop (`pnpm e2e` in `keeper/`), and the keeper signs a quote on them only with its test key.
 
 ## Layout
 
