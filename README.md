@@ -49,9 +49,9 @@ function main(payload) {
 
 What the keeper does with a delivery: it decodes each log with the contract's ABI, keeps it, and pushes it over server-sent events to every page that has that promo open (`GET /promos/:id/events`). The page shows the line at once and reads the promo again. A `Finalized` event with a "yes" also wakes the settlement loop, so the payout follows the confirmation by seconds.
 
-Why a Stream and not polling: one delivery per block with vault activity reaches one place, about a second after the block, and fans out to every viewer. No browser asks the chain, and the public RPC's rate limit stops being the app's limit.
+Why a Stream and not polling: one delivery per block with vault activity reaches one place and fans out to every viewer. No browser asks the chain, and the public RPC's rate limit stops being the app's limit.
 
-What happens when the Stream is late or off: the keeper also reads the vault's logs from the chain every two seconds, and adds any event the Stream has not delivered once it is four seconds old. Every event is marked with the way it came. Turn on the mechanics view (`?mechanics=1`) on a promo page to see it on each line: "QuickNode Stream · 0.8 s after the block", or "RPC".
+What happens when the Stream is late or off: the keeper also reads the vault's logs from the chain every two seconds, and adds any event the Stream has not delivered once it is four seconds old. Every event is marked with the way it came. Turn on the mechanics view (`?mechanics=1`) on a promo page to see it on each line: "QuickNode Stream" or "RPC", with how many seconds after its block the keeper had the event.
 
 The filter is tested as it runs, against real blocks of the deployed vault, and its topic hashes are checked against the ABI (`keeper/test/stream.test.ts`). More in [`keeper/README.md`](keeper/README.md), "The feed".
 

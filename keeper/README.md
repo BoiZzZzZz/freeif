@@ -86,7 +86,7 @@ Why a Stream: the pages should change within about a second of the block, for ev
 
 **The keeper's own read.** Every two seconds the keeper asks the chain for the vault's logs since the last block it read. A log the Stream has already delivered is skipped. A log it has not delivered is left alone until it is four seconds old, then added as `rpc`. So the Stream gets to deliver first, a late or stopped Stream costs a few seconds and nothing else, and events from before the Stream existed are there too: on its first start the keeper finds the block the vault was deployed in (by bisection on `eth_getCode`) and reads forward from there, in ranges of 9,000 blocks (Arc's RPC refuses more than 10,000).
 
-Each event is kept with its block, its time, how it came (`via`) and when the keeper had it (`seenAt`), in the keeper's file. The mechanics view of the promo page shows both: "QuickNode Stream · 0.8 s after the block" or "RPC".
+Each event is kept with its block, its time, how it came (`via`) and when the keeper had it (`seenAt`), in the keeper's file. The mechanics view of the promo page shows both on each line: "QuickNode Stream" or "RPC", with how many seconds after its block the keeper had the event.
 
 The filter is tested as it runs: `test/stream.test.ts` loads `stream/filter.js`, runs it on real blocks of the deployed vault (`test/fixtures/vault-logs.json`), and checks every topic hash in it against the contract's ABI. `pnpm stream test` runs the same file at QuickNode on one block.
 

@@ -373,8 +373,11 @@ function Trade({
 
   const amount = parseDollars(text);
   const minted = amount === null ? 0n : totalShares === 0n ? amount - DEAD_SHARES : basis === 0n ? 0n : (amount * totalShares) / basis;
-  // Shares to burn for `amount`, rounded up so the wallet receives at least what was typed.
-  const burned = amount === null || free === 0n ? 0n : amount >= withdrawable ? shares : (amount * totalShares + free - 1n) / free;
+  // Shares to burn for `amount`, rounded up so the wallet receives at least what was typed. Amounts are
+  // typed in cents, so one that is every whole cent of what can be withdrawn burns all the shares:
+  // "Max" must not leave a fraction of a cent behind as shares.
+  const wholeCents = (withdrawable / 10_000n) * 10_000n;
+  const burned = amount === null || free === 0n ? 0n : amount >= wholeCents ? shares : (amount * totalShares + free - 1n) / free;
   const received = totalShares === 0n ? 0n : (burned * free) / totalShares;
   const leftBehind = totalShares === 0n ? 0n : (burned * pending) / totalShares;
 
