@@ -91,7 +91,13 @@ console.log(
   `chance ${(priced.breakdown.chance * 100).toFixed(0)}%, most owed ${usd(priced.breakdown.mostOwed)}, fee ${usd(priced.breakdown.fee)}, ` +
     `cost ${usd(priced.breakdown.cost)}; the vault can cover ${priced.maxCustomers} customers (${priced.limit})`,
 );
-const quoted = await ok<QuoteBody>("/quote", { ...request, merchant: merchant.account.address });
+// A quote on a 5-minute market is the test loop's alone: without the test key it is refused.
+const noKey = await api<{ error?: { code: string } }>("/quote", { ...request, merchant: merchant.account.address });
+if (noKey.status !== 422 || noKey.body.error?.code !== "test-only") {
+  throw new Error(`A quote on a test market without the test key answered ${noKey.status}: ${JSON.stringify(noKey.body).slice(0, 200)}`);
+}
+console.log("without the test key the quote is refused (test-only)");
+const quoted = await ok<QuoteBody>("/quote", { ...request, merchant: merchant.account.address }, { "x-test-key": testKey });
 const quote = quoteFromJson(quoted.quote);
 
 // What the merchant's wallet would check before paying: the vault agrees with the hash and the signer.

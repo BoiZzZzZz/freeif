@@ -23,14 +23,16 @@ const LEAGUES = [
 ];
 const FIRST_SHOWN = 8;
 
-// The build's test loop: with `?dev=1` in the address there is one more tab, 5-minute BTC markets,
-// which settle in minutes where a game takes hours. It is never visible otherwise.
+// The build's test loop: with `?dev=` in the address there is one more tab, 5-minute BTC markets,
+// which settle in minutes where a game takes hours. It is never visible otherwise. The keeper signs a
+// quote on those markets only with its test key, so `?dev=1` shows the tab and its prices, and
+// `?dev=<the test key>` can also pay (`testKey` in lib/keeper.ts sends it).
 const CRYPTO = { key: "btc05m", name: "Crypto 5-min" };
 const noop = () => () => {};
 const useDev = () =>
   useSyncExternalStore(
     noop,
-    () => new URLSearchParams(window.location.search).get("dev") === "1",
+    () => Boolean(new URLSearchParams(window.location.search).get("dev")),
     () => false,
   );
 

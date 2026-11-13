@@ -14,7 +14,7 @@ import { CHAIN_ID, rpcUrls } from "./config.ts";
 import { Status, arcTestnet, statusName, type PublicClient } from "./chain.ts";
 import { LEAGUES, WEATHER, type Games } from "./games.ts";
 import type { Odds } from "./odds.ts";
-import { getEvent, priceToBps, upcomingIntervalTickers } from "./gemini.ts";
+import { getEvent, isIntervalMarket, priceToBps, upcomingIntervalTickers } from "./gemini.ts";
 import { cleanText, findLabel } from "./labels.ts";
 import { Gate, LIMITS, Limiter, type Limits } from "./limit.ts";
 import { Pricer, Refusal, type PriceRequest } from "./pricer.ts";
@@ -309,9 +309,15 @@ export function makeApp(d: Deps): Hono {
     const merchant = body.merchant;
     if (typeof merchant !== "string" || !isAddress(merchant)) throw new BadRequest("merchant must be an address");
     const label = { item: cleanText(body.item), business: cleanText(body.business) };
-    return c.json(
-      await d.pricer.signQuote({ ...parsePriceRequest(body), merchant, hedgeMode: body.hedgeMode === true, label }),
-    );
+    const request = parsePriceRequest(body);
+    // A 5 or 15-minute market is sold while it is running, and a signed quote stands for 90 seconds: on
+    // such a market that is time to watch the price and use the quote only if it moved the buyer's way,
+    // at the vault's cost. So a quote on one is the test loop's alone, behind the test key. With no key
+    // set on the keeper these markets are not sold at all. `GET /price` is unsigned and stays open.
+    if (isIntervalMarket({ ticker: request.eventTicker }) && (d.testKey === undefined || !sameSecret(c.req.header("x-test-key"), d.testKey))) {
+      throw new Refusal("test-only", "This market is for testing only.");
+    }
+    return c.json(await d.pricer.signQuote({ ...request, merchant, hedgeMode: body.hedgeMode === true, label }));
   });
 
   // Step 1 of the merchant form: one league's games that have not started, each team with its chance.

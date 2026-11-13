@@ -200,6 +200,14 @@ test("getPrice_gameThatHasStarted_isRefused", async () => {
   assert.equal((await pricer.getPrice(wings)).limit, "ok");
 });
 
+test("anEventWithNoStart_isNotSold_pricedOrSigned", async () => {
+  // Not a game, not a day's temperature, not a test window: nothing says when its result begins to be
+  // known, so a quote on it could be held while the price moves.
+  const { pricer } = setup(game({ startTime: undefined, ticker: "BTC-ABOVE-2611132300" }));
+  await refusal(pricer.getPrice(wings), "unknown-event");
+  await refusal(pricer.signQuote({ ...wings, merchant: MERCHANT }), "unknown-event");
+});
+
 test("getPrice_intervalMarket_isQuotableWhileRunning_until60SecondsBeforeItCloses", async () => {
   // The window is running: it started 100 seconds ago and closes in 200.
   const { pricer, clock } = setup(window5m(200));

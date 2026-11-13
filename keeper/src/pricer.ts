@@ -59,6 +59,7 @@ export type RefusalCode =
   | "unknown-event"
   | "unknown-contract"
   | "market-closed"
+  | "test-only"
   | "no-price"
   | "event-started"
   | "deadline-too-late"
@@ -326,7 +327,10 @@ export class Pricer {
     const interval = isIntervalMarket(event);
     // A game is sold until kickoff, a temperature market until its day begins.
     const start = eventStart(event);
-    const latest = interval || start === null ? marketCloseTime - intervalCutoffSeconds : start;
+    // An event with no start has no moment before which its result is unknown: its price moves on news
+    // until it closes, and a quote stands for 90 seconds whatever the price does. It is not sold.
+    if (!interval && start === null) throw new Refusal("unknown-event", "We do not cover this kind of event.");
+    const latest = interval ? marketCloseTime - intervalCutoffSeconds : start!;
     if (now >= latest) throw new Refusal("event-started", "This event has already started.");
 
     let claimDeadline = latest;
