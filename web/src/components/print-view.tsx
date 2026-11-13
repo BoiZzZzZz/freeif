@@ -11,7 +11,7 @@ import { usePromo } from "@/lib/use-promo";
 const noop = () => () => {};
 
 export function PrintView({ id }: { id: string }) {
-  const { promo, missing } = usePromo(id);
+  const { promo, missing, unreachable } = usePromo(id);
   const origin = useSyncExternalStore(
     noop,
     () => window.location.origin,
@@ -19,6 +19,7 @@ export function PrintView({ id }: { id: string }) {
   );
 
   if (missing) return <p className="p-8 text-[16px]">We couldn&apos;t find this promo.</p>;
+  if (unreachable) return <p className="p-8 text-[16px]">We can&apos;t reach FreeIf right now. This page keeps trying.</p>;
   if (!promo || origin === "") return null;
 
   const item = promo.item ?? "Your purchase";

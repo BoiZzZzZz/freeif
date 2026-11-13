@@ -37,6 +37,8 @@ export type ReceiptCardProps = {
   customerNumber?: number | null;
   /** When the payout was sent, unix seconds. */
   paidAt?: number | null;
+  /** True when this customer's payout did not go through and is set aside to be sent again. */
+  waiting?: boolean;
   /**
    * True for a cover: the payout goes to the business itself. The card then reads "To Tony's Pizza,
    * $250.00, if the high in Austin ...", with no kickoff and no customer line.
@@ -81,7 +83,7 @@ function resultLine(p: ReceiptCardProps): string | null {
   const subject = capitalize(p.subject ?? "");
   switch (p.state) {
     case "won":
-      return `Paying you ${usd(p.amount)} now`;
+      return p.waiting ? `Your ${usd(p.amount)} is set aside. We're sending it again.` : `Paying you ${usd(p.amount)} now`;
     case "lost":
       return subject ? `${subject} lost. Nothing was owed.` : "It didn't happen. Nothing was owed.";
     case "cancelled":

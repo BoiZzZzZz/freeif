@@ -28,6 +28,10 @@ export type LivePromo = {
   promo: Promo | null;
   /** True when the keeper does not know this promo, and never has while this page was open. */
   missing: boolean;
+  /** True when the keeper cannot be reached and there is no promo to show yet. The page keeps asking. */
+  unreachable: boolean;
+  /** True when the keeper's event stream has dropped and is being reconnected. The timer reads meanwhile. */
+  reconnecting: boolean;
   /** Puts a promo the caller has just read on the page. */
   show: (promo: Promo) => void;
 };
@@ -36,7 +40,9 @@ export type LivePromo = {
 export function usePromo(id: string, customer: string | null = null): LivePromo {
   const [promo, setPromo] = useState<Promo | null>(null);
   const [missing, setMissing] = useState(false);
-  const [connected, setConnected] = useState(false);
+  const [failed, setFailed] = useState(false);
+  // Null until the event stream has either opened or failed to.
+  const [connected, setConnected] = useState<boolean | null>(null);
   const finished = promo !== null && FINISHED.has(promo.status);
   // Reads are numbered, so an answer that comes back after a newer one is dropped.
   const started = useRef(0);
@@ -55,10 +61,14 @@ export function usePromo(id: string, customer: string | null = null): LivePromo 
           if (mine < shown.current) return;
           shown.current = mine;
           setMissing(false);
+          setFailed(false);
           setPromo((held) => withEvents(next, held?.promoId === next.promoId ? held.events : []));
         },
         (err) => {
+          if (signal?.aborted) return;
           if (err instanceof KeeperError && (err.status === 404 || err.status === 400)) setMissing(true);
+          // Anything else is the keeper or the connection: the timer asks again.
+          else setFailed(true);
         },
       );
     },
@@ -69,7 +79,7 @@ export function usePromo(id: string, customer: string | null = null): LivePromo 
   useEffect(() => {
     const controller = new AbortController();
     void load(controller.signal);
-    const every = finished ? 60_000 : connected ? 15_000 : 4_000;
+    const every = finished ? 60_000 : connected === true ? 15_000 : 4_000;
     const timer = window.setInterval(() => void load(controller.signal), every);
     return () => {
       controller.abort();
@@ -105,5 +115,11 @@ export function usePromo(id: string, customer: string | null = null): LivePromo 
   }, [id, finished, load]);
 
   // A promo that has been on the page exists, whatever one later answer says.
-  return { promo, missing: missing && promo === null, show };
+  return {
+    promo,
+    missing: missing && promo === null,
+    unreachable: failed && !missing && promo === null,
+    reconnecting: !finished && connected === false,
+    show,
+  };
 }

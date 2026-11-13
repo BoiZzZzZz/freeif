@@ -35,7 +35,7 @@ export function PromoView({ id }: { id: string }) {
   const wallet = useWallet();
   const mine = useLocal<MyPromo[]>(KEYS.promos, NO_PROMOS);
   const mechanics = useMechanics();
-  const { promo, missing } = usePromo(id);
+  const { promo, missing, unreachable, reconnecting } = usePromo(id);
   // The chance is read again while the promo has no result. Until the promo is known, nothing is polled.
   const odds = useOdds(id, promo?.status === "Open");
   const now = Math.floor(useNow(5000) / 1000);
@@ -44,6 +44,15 @@ export function PromoView({ id }: { id: string }) {
     return (
       <Frame>
         <p className="rounded-[10px] border border-line bg-card p-5 text-[16px]">We couldn&apos;t find this promo.</p>
+      </Frame>
+    );
+  }
+  if (unreachable) {
+    return (
+      <Frame>
+        <p className="rounded-[10px] border border-line bg-card p-5 text-[16px]" role="status">
+          We can&apos;t reach FreeIf right now. This page keeps trying, and nothing about the promo changes meanwhile.
+        </p>
       </Frame>
     );
   }
@@ -82,10 +91,18 @@ export function PromoView({ id }: { id: string }) {
           {status.tone === "go" && <span className="size-2 rounded-full bg-go" />}
           {status.badge}
         </span>
-        <span className="num flex items-center gap-1.5 text-[12px] text-ink/60">
-          <span className="size-2 rounded-full bg-go" />
-          {mechanics ? `Live · ${transport}` : "Live"}
-        </span>
+        {reconnecting ? (
+          // The page still reads the promo every few seconds; only the instant updates are down.
+          <span className="num flex items-center gap-1.5 text-[12px] text-ink/60" role="status">
+            <span className="size-2 rounded-full border border-ink/40" />
+            Reconnecting
+          </span>
+        ) : (
+          <span className="num flex items-center gap-1.5 text-[12px] text-ink/60">
+            <span className="size-2 rounded-full bg-go" />
+            {mechanics ? `Live · ${transport}` : "Live"}
+          </span>
+        )}
       </div>
       <h1 className="mt-2 text-[26px] font-semibold leading-tight tracking-tight">{titleOf(promo)}</h1>
       <p className="mt-1 text-[15px] text-ink/60">

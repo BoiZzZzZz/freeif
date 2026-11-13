@@ -48,7 +48,7 @@ export function ClaimView({ promoId }: { promoId: string }) {
 
   // The page stays open through the game: the result and the payout arrive here by themselves, the
   // moment the keeper has them.
-  const { promo, missing, show } = usePromo(promoId, address);
+  const { promo, missing, unreachable, show } = usePromo(promoId, address);
 
   useEffect(() => wallet.warm(), [wallet]);
 
@@ -73,6 +73,15 @@ export function ClaimView({ promoId }: { promoId: string }) {
     return (
       <Frame>
         <p className="rounded-[10px] border border-line bg-card p-5 text-[16px]">We couldn&apos;t find this promo. Ask at the counter for the code to scan.</p>
+      </Frame>
+    );
+  }
+  if (unreachable) {
+    return (
+      <Frame>
+        <p className="rounded-[10px] border border-line bg-card p-5 text-[16px]" role="status">
+          We can&apos;t reach FreeIf right now. Keep this page open: it keeps trying.
+        </p>
       </Frame>
     );
   }
@@ -112,6 +121,8 @@ export function ClaimView({ promoId }: { promoId: string }) {
   const mine = promo.customer?.address.toLowerCase();
   const paidAt = promo.events.findLast((e) => e.event === "Paid" && e.customer?.toLowerCase() === mine)?.at ?? null;
   const item = promo.item?.toLowerCase();
+  // A payout that did not go through is set aside for this customer and sent again.
+  const waiting = BigInt(promo.customer?.owed ?? "0") > 0n;
 
   return (
     <Frame>
@@ -128,6 +139,7 @@ export function ClaimView({ promoId }: { promoId: string }) {
         maxClaims={promo.maxClaims}
         customerNumber={promo.customer?.number}
         paidAt={paidAt}
+        waiting={waiting}
         onDetails={() => setDetails(true)}
       />
 
@@ -138,7 +150,7 @@ export function ClaimView({ promoId }: { promoId: string }) {
             Saving your spot
           </p>
         ) : covered ? (
-          <Covered promo={promo} state={state} address={promo.customer!.address} />
+          <Covered promo={promo} state={state} address={promo.customer!.address} waiting={waiting} />
         ) : taking === "yes" ? (
           <>
             <h1 className="text-[22px] font-semibold leading-tight">{item ? `Bought ${item}? Get covered.` : "Made your purchase? Get covered."}</h1>
@@ -209,7 +221,7 @@ function Frame({ children }: { children: React.ReactNode }) {
 }
 
 /** Under the card of a covered customer: what to do (nothing), and after a payout, the balance. */
-function Covered({ promo, state, address }: { promo: Promo; state: CardState; address: string }) {
+function Covered({ promo, state, address, waiting }: { promo: Promo; state: CardState; address: string; waiting: boolean }) {
   const [balance, setBalance] = useState<bigint | null>(null);
   const [cashOut, setCashOut] = useState(false);
   const paid = state === "paid";
@@ -249,6 +261,13 @@ function Covered({ promo, state, address }: { promo: Promo; state: CardState; ad
         <h1 className="text-[22px] font-semibold leading-tight">You&apos;re covered. Keep this page.</h1>
         <p className="text-[16px] text-ink/60">The result shows up here after the game, usually within three hours of kickoff.</p>
       </>
+    );
+  }
+  if (state === "won" && waiting) {
+    return (
+      <p className="text-[16px]">
+        Your {usd(promo.customer?.owed)} is set aside for you. Sending it didn&apos;t work the first time, so we keep trying. Nothing to do.
+      </p>
     );
   }
   if (state === "won") {
