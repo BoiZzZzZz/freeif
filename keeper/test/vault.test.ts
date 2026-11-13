@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Address, Hex } from "viem";
 import { Status, type PublicClient } from "../src/chain.ts";
+import { Odds } from "../src/odds.ts";
 import { makeApp } from "../src/server.ts";
 import { Store } from "../src/store.ts";
 import { Feed } from "../src/stream.ts";
@@ -67,9 +68,13 @@ function setup() {
   store.data.events[EVENT] = { eventId: "1", eventTicker: "NFL-X-M", title: "Lions at Bears", game: "Lions at Bears" };
   store.data.instruments[WINGS] = { symbol: "GEMI-X", label: "Detroit", condition: "the Lions win" };
   store.data.promoLabels["0"] = { item: "Wings", business: "Tony's Pizza" };
+  // Readings of Gemini's book: the open promo's, and one left over from the promo that ended "no".
+  store.data.odds["0"] = [[1794590000, 3900, 3800, 3900], [1794590030, 4100, 3900, 4100]];
+  store.data.odds["1"] = [[1794590000, 6000, 5800, 6000]];
   const feed = new Feed({ store, vault: VAULT, log: () => undefined });
+  const odds = new Odds({ store, everySeconds: 30 });
   const unused = {} as never;
-  const app = makeApp({ client, vault: VAULT, usdc: USDC, maxLockedBps: 6000, pricer: unused, games: unused, relayer: unused, oracle: VAULT, store, feed });
+  const app = makeApp({ client, vault: VAULT, usdc: USDC, maxLockedBps: 6000, pricer: unused, games: unused, relayer: unused, oracle: VAULT, store, feed, odds });
   return { app, feed, calls };
 }
 
@@ -83,7 +88,7 @@ type Vault = {
   maxExposureBps: number;
   maxLockedBps: number;
   netEarned: string;
-  promos: Array<{ promoId: string; status: string; item: string | null; game: string | null; condition: string | null; premium: string; maxPayout: string; locked: string; net: string | null }>;
+  promos: Array<{ promoId: string; status: string; item: string | null; game: string | null; condition: string | null; premium: string; maxPayout: string; locked: string; net: string | null; chance: number | null }>;
   events: unknown[];
 };
 
@@ -118,6 +123,12 @@ test("getVault_aPromo_carriesItsWordsAndWhatItLocks", async () => {
   assert.deepEqual([open.premium, open.maxPayout, open.locked], ["39310000", "96000000", "96000000"]);
   // A promo with no label kept for it has no item.
   assert.equal(v.promos[1]!.item, null);
+});
+
+test("getVault_anOpenPromo_carriesTheChanceAtItsNewestReading_andAPromoWithAResultCarriesNone", async () => {
+  const { app } = setup();
+  const v = (await (await app.request("/vault")).json()) as Vault;
+  assert.deepEqual(v.promos.map((p) => p.chance), [0.41, null, null, null]);
 });
 
 test("getVault_manyRequests_readTheChainOnce_untilAnEventArrives", async () => {

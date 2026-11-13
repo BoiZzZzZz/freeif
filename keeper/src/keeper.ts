@@ -6,6 +6,7 @@ import { keccak256, parseEventLogs, toBytes, type Address, type Hex } from "viem
 import { promoVaultAbi } from "./abi.ts";
 import { Status, explorerTx, statusName, type PublicClient, type WalletClient } from "./chain.ts";
 import { getEvent, listEvents, type GeminiContract, type GeminiEvent } from "./gemini.ts";
+import type { OpenPromo } from "./odds.ts";
 import { revertName } from "./relayer.ts";
 import { sleep } from "./sleep.ts";
 import type { Store } from "./store.ts";
@@ -16,6 +17,8 @@ type Deps = {
   wallet: WalletClient;
   vault: Address;
   store: Store;
+  /** Takes a reading of Gemini's book for every promo that is waiting for its result (odds.ts). */
+  odds?: { sample: (promos: readonly OpenPromo[]) => Promise<unknown> };
   log?: (line: string) => void;
 };
 
@@ -83,6 +86,15 @@ export class Keeper {
       allowFailure: false,
       contracts: ids.map((id) => ({ address: vault, abi: promoVaultAbi, functionName: "getPromo", args: [id] }) as const),
     });
+
+    // The chart's readings, for every promo that has no result yet. Not waited for: a slow answer from
+    // Gemini must not hold up a settlement.
+    const open: OpenPromo[] = [];
+    for (const [i, id] of ids.entries()) {
+      const { status, instrumentSymbol } = promos[i] as Promo;
+      if (status === Status.Open) open.push({ promoId: id.toString(), instrumentSymbol });
+    }
+    void this.#d.odds?.sample(open);
 
     let sent = 0;
     for (const [i, id] of ids.entries()) {

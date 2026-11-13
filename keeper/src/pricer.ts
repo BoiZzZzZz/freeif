@@ -7,6 +7,7 @@ import { quoteDomain, quoteToJson, quoteTypes, type PublicClient, type Quote } f
 import { getEvent, isIntervalMarket, priceToBps, ruleText, toUnix, type GeminiContract, type GeminiEvent } from "./gemini.ts";
 import { pendingLabel, prunePending, type Label } from "./labels.ts";
 import { displayNames } from "./names.ts";
+import { keepPending } from "./odds.ts";
 import { checkLimits, maxCustomers, price, type Limit, type Price, type PricingParams, type VaultState } from "./pricing.ts";
 import type { Store } from "./store.ts";
 
@@ -176,6 +177,13 @@ export class Pricer {
       store.data.pendingLabels[quote.nonce] = pendingLabel(quote, req.label, this.#now());
       prunePending(store.data.pendingLabels);
     }
+    // The price this quote was made on is the first point of the promo's chart, if the quote is used.
+    keepPending(store.data.pendingOdds, quote.nonce, [
+      p.fetchedAt,
+      p.askBps,
+      priceToBps(p.contract.prices?.bestBid),
+      priceToBps(p.contract.prices?.bestAsk),
+    ]);
     store.data.liveQuotes[quote.nonce] = {
       maxPayout: p.price.maxPayout.toString(),
       premium: p.price.premium.toString(),

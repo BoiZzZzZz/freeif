@@ -86,7 +86,35 @@ export async function listEvents(query: {
   return get<Page>(`/v1/prediction-markets/events?${params}`, 40_000);
 }
 
-const INTERVAL_TICKER = /^([A-Z]+)(05|15)M(\d{10})$/;
+/** The best bid and the best ask of a contract, as Gemini writes prices ("0.42"). Null on a side with no order. */
+export type TopOfBook = { bid: string | null; ask: string | null };
+
+/** Reads the top of the book from what Gemini's order-book route answers: `{ bids: [{ price }], asks: [{ price }] }`. */
+export function topOfBook(body: unknown): TopOfBook {
+  const first = (side: unknown): string | null => {
+    const order: unknown = Array.isArray(side) ? side[0] : undefined;
+    const price = order !== null && typeof order === "object" ? (order as { price?: unknown }).price : undefined;
+    return typeof price === "string" ? price : null;
+  };
+  const { bids, asks } = (body !== null && typeof body === "object" ? body : {}) as { bids?: unknown; asks?: unknown };
+  return { bid: first(bids), ask: first(asks) };
+}
+
+/**
+ * The top of one contract's order book, by its instrument symbol (`GEMI-NFL-2611151430-NE-DET-M-NE`).
+ * It is Gemini's exchange route for any symbol and answers in about 140 bytes, where the contract's event
+ * is a megabyte for a game. A settled contract has an empty book. Null when Gemini has no such symbol.
+ */
+export async function getBook(symbol: string): Promise<TopOfBook | null> {
+  try {
+    return topOfBook(await get<unknown>(`/v1/book/${encodeURIComponent(symbol)}?limit_bids=1&limit_asks=1`, 10_000));
+  } catch (err) {
+    if (err instanceof GeminiError && (err.status === 400 || err.status === 404)) return null;
+    throw err;
+  }
+}
+
+const INTERVAL_TICKER =/^([A-Z]+)(05|15)M(\d{10})$/;
 
 /** 5 and 15-minute crypto markets. They are the test loop: quotable while the window is running. */
 export function isIntervalMarket(event: Pick<GeminiEvent, "ticker">): boolean {

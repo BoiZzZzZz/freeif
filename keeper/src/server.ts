@@ -12,6 +12,7 @@ import { promoVaultAbi } from "./abi.ts";
 import { CHAIN_ID, rpcUrls } from "./config.ts";
 import { Status, arcTestnet, statusName, type PublicClient } from "./chain.ts";
 import { LEAGUES, type Games } from "./games.ts";
+import type { Odds } from "./odds.ts";
 import { getEvent, priceToBps, upcomingIntervalTickers } from "./gemini.ts";
 import { cleanText, findLabel } from "./labels.ts";
 import { Pricer, Refusal, type PriceRequest } from "./pricer.ts";
@@ -33,6 +34,8 @@ type Deps = {
   oracle: Address;
   store: Store;
   feed: Feed;
+  /** The readings of each promo's chance. Without it the keeper has none to give (tests). */
+  odds?: Odds;
   /** The test loop's key for claims with no login. Undefined turns that way in off. */
   testKey?: string;
   /** The secret the QuickNode Stream sends with each delivery. Undefined refuses every delivery. */
@@ -392,6 +395,8 @@ export function makeApp(d: Deps): Hono {
         settledAt: Number(p.settledAt),
         outcomeYes: p.outcomeYes,
         net: net === null ? null : net.toString(),
+        /** The chance of "yes" at the newest reading of Gemini's book, while the promo has no result. */
+        chance: p.status === Status.Open ? (d.odds?.chance(raw)?.chance ?? null) : null,
       };
     });
 
@@ -445,6 +450,18 @@ export function makeApp(d: Deps): Hono {
     const id = c.req.param("id");
     if (!/^\d+$/.test(id)) throw new BadRequest("promo id must be a whole number");
     return eventStream(c, d.feed, (event) => event.promoId === id);
+  });
+
+  // How a promo's chance has moved since it started: the keeper's readings of Gemini's book, oldest
+  // first, each `[unix seconds, chance, bid, ask]` with the three prices in basis points of a dollar. The
+  // page draws them as its chart. With `?after=` only the readings later than that time.
+  app.get("/promos/:id/odds", (c) => {
+    const id = c.req.param("id");
+    if (!/^\d+$/.test(id)) throw new BadRequest("promo id must be a whole number");
+    const after = c.req.query("after") ?? "0";
+    if (!/^\d{1,12}$/.test(after)) throw new BadRequest("after must be a unix time");
+    const history = d.odds?.history(id, Number(after)) ?? { everySeconds: 0, start: null, points: [], latest: null };
+    return c.json({ promoId: id, ...history });
   });
 
   // A promo as the chain has it, with the plain names behind its two hashes, what the merchant said is

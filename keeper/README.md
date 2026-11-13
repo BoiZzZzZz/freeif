@@ -1,11 +1,12 @@
 # keeper
 
-One Node process that does five jobs for `PromoVault`:
+One Node process that does six jobs for `PromoVault`:
 
 - **Game list.** Reads Gemini's active game-winner markets league by league and serves them to the merchant form, each team with its chance and the words a customer reads ("the Lions win").
 - **Pricing.** Reads the ask for a result from Gemini's prediction-market API, adds the spread, checks the vault can cover the promo, and signs the EIP-712 quote that `createPromo` checks.
 - **Claim relayer.** Its key is every promo's claim signer, so it is the only address that can register a customer. A claim carries the customer's Circle login token; the relayer asks Circle whose it is and registers only that user's own wallet, once per user per promo.
 - **Settlement loop.** Every 30 seconds: posts Gemini's result once claims are closed (`settle`), finalizes after the dispute window (`finalize`), pays the customers of a "yes" (`payoutBatch`), and retries payouts whose transfer failed (`retryPayout`).
+- **Odds history.** On every pass of that loop it reads the top of Gemini's order book for the contract of each promo that has no result yet, and keeps the bid and the ask with the time. The promo page draws them as its chart: how the chance has moved since the promo started.
 - **Event feed.** A QuickNode Stream posts the vault's logs to `POST /stream` as blocks land. The keeper decodes them, keeps them, and pushes each one to the pages that show its promo. It also reads the chain's logs itself, a few seconds behind, for any event the Stream has not delivered. Each event remembers which way it came.
 
 Each step of the loop is decided from on-chain state and simulated before it is sent, so a restart never repeats one.
@@ -54,10 +55,11 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 | `POST /claims` | Body: `promoId`, `customer`, `userToken` (the customer's Circle login token from the web app). The keeper asks Circle whose token it is, then registers the customer on chain. 401 `login` when Circle does not know the token (it lasts an hour), 403 `not-your-wallet` when `customer` is not one of that user's wallets on Arc, 409 `already-claimed` when that user has claimed this promo with another wallet, 502 `failed` when Circle or the chain cannot be reached. A repeated claim answers 200 with `alreadyRegistered: true` and sends nothing. The test loop sends `testUser` (any name) in place of `userToken`, with the header `X-Test-Key: <CLAIM_TEST_KEY>` |
 | `GET /promos/:id` | The promo as the chain has it, with the event and result names behind its two hashes, the words for the card, `item` and `business`, `events` (the promo's events on the vault, oldest first, each with `via`: `stream` or `rpc`), `stream` (the Stream's deliveries so far and the time of the last) and `txs` (the transactions the keeper sent for it). With `?customer=0x...` it adds `customer`: that address's place in line, and whether it has been paid. The chain is read once a second per promo at most, however many pages ask |
 | `GET /promos/:id/events` | Server-sent events: each new event on the promo as a `vault` message, the moment the keeper has it. The pages keep this open |
+| `GET /promos/:id/odds` | How the promo's chance has moved since it started. `points` are the keeper's readings of Gemini's book, oldest first, each `[time, chance, bid, ask]` with the three prices in basis points of a dollar (4100 is 0.41, a 41% chance); `start` is the reading the promo was priced on, at the time the promo started; `latest` is the newest reading; `everySeconds` is how often the book is read. With `?after=<time>` only the readings later than that. The chain is not read |
 | `GET /events` | The same for every event on the vault |
 | `GET /feed?limit=100` | The newest events of every kind, oldest first, and the Stream's record |
 | `POST /stream` | The QuickNode Stream's webhook. Takes a delivery with QuickNode's signature or with the secret header; answers 401 to anything else |
-| `GET /vault` | The vault as a liquidity provider reads it: `balance`, `locked`, `pending` (the locks of promos with no final result), `free` (what a withdrawal is priced on), `depositBasis` (what a deposit is priced on), `totalShares`, the two limits, `netEarned`, every promo with what it locks and what it made, and the newest events. One read of the chain, shared for two seconds |
+| `GET /vault` | The vault as a liquidity provider reads it: `balance`, `locked`, `pending` (the locks of promos with no final result), `free` (what a withdrawal is priced on), `depositBasis` (what a deposit is priced on), `totalShares`, the two limits, `netEarned`, every promo with what it locks, what it made and, while it has no result, its `chance` at the newest reading of Gemini's book, and the newest events. One read of the chain, shared for two seconds |
 | `GET /intervals?series=BTC05M` | The next windows of a 5 or 15-minute crypto market (the test loop) |
 
 `claimDeadline` is `start` (the default: the promo takes customers until the event starts), `30min` (until 30 minutes before) or a unix time no later than the start.
@@ -67,6 +69,17 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 - Gemini lists every market of a game as its own event, and a page of 100 events is 3 to 12 MB. The keeper asks one league at a time with Gemini's `search` filter, keeps the events whose ticker ends in `-M` (the game's winner), and holds each league's list in memory. A list older than two minutes is served as it is while a new one is read, so only the first read after a start waits for Gemini; the keeper does that read itself when it starts.
 - A team can be picked when it has both a bid and an ask and is not too likely. An empty book shows an ask of 0.02 with no bid; that is not a 2% chance.
 - Names come from Gemini, never from the merchant: a pro team goes by its nickname ("Miami" with the participant "Miami Heat" is "the Heat"), a college by its own name. What a merchant does send, with the quote request, is what is free and the shop's name (`item`, `business`, 40 characters each). They are tied to the promo the first time it is read: a promo can only carry a quote's exact merchant, amounts and deadline if the pricer signed that quote.
+
+## The odds history
+
+A promo's page shows how its chance has moved since the promo started. The readings behind that chart are the keeper's own.
+
+- **What is read.** Gemini's exchange API serves every prediction-market contract by its instrument symbol. `GET /v1/book/<symbol>?limit_bids=1&limit_asks=1` answers with the best bid and the best ask in about 140 bytes; the contract's event, which the pricing service reads for a quote, is about a megabyte for a game. The loop reads the book once per contract on every pass, so two promos on one team share a read, and it does not wait for the answer before it settles and pays.
+- **The chance** is the ask: the price the pricing service quotes on. A book with a side missing is no price (an empty book on Gemini shows an ask of 0.02 and no bid), and neither is one whose two sides are more than half a dollar apart (a 5-minute window that has not started shows 0.01 against 0.99). Such a book adds no reading.
+- **What is kept.** A reading that differs from the last one kept, and one every five minutes while nothing moves. When the book moves after a quiet stretch, the last reading before the move is kept too, so the line stays flat up to the move. At most 4,000 readings per promo: past that, the older half loses every second one.
+- **The first point** is the price the promo was sold at. The pricing service keeps the reading each quote was priced on under the quote's nonce; when the feed gets the promo's `PromoCreated`, which carries that nonce, the reading becomes the promo's `start`, at the block's time.
+
+Readings stop when the promo has a result on chain. A promo made before Nov 13 afternoon has no `start`, and its readings begin when this was deployed.
 
 ## The feed: a QuickNode Stream, and the chain behind it
 
@@ -130,6 +143,7 @@ Run one keeper per vault. A second one with the same keys does no harm to the va
 | `src/pricer.ts` | The pricing service: Gemini's ask, the vault's state, the signed quote |
 | `src/relayer.ts`, `src/circle.ts` | `registerClaim`, one claim per Circle user, and the question to Circle: whose login is this, and which wallets are theirs |
 | `src/keeper.ts` | The settlement loop |
+| `src/odds.ts` | The odds history: the readings of Gemini's book for each open promo, and which of them are kept |
 | `src/stream.ts` | The feed: decoding a delivery, the events kept, the keeper's own read of the chain |
 | `stream/filter.js`, `scripts/stream.ts` | The QuickNode Stream's filter, and the script that makes, tests, pauses and removes the Stream |
 | `src/server.ts`, `src/main.ts` | The HTTP API and the process |

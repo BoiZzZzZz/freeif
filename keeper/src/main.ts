@@ -7,6 +7,7 @@ import { makeIdentify } from "./circle.ts";
 import * as config from "./config.ts";
 import { Games } from "./games.ts";
 import { Keeper } from "./keeper.ts";
+import { Odds } from "./odds.ts";
 import { Pricer } from "./pricer.ts";
 import { Relayer } from "./relayer.ts";
 import { makeApp } from "./server.ts";
@@ -47,7 +48,9 @@ const pricer = new Pricer({
   timing,
   store,
 });
-const keeper = new Keeper({ client, wallet: oracleWallet, vault, store });
+// How each promo's chance moves: a reading of Gemini's book on every pass of the loop.
+const odds = new Odds({ store, everySeconds: Math.round(timing.loopMs / 1000) });
+const keeper = new Keeper({ client, wallet: oracleWallet, vault, store, odds });
 const games = new Games({ spreadBps: config.pricingParams().spreadBps, minLeadSeconds: timing.minClaimWindowSeconds });
 
 // The vault's events: delivered by the QuickNode Stream to `POST /stream`, and read from the chain by
@@ -58,6 +61,8 @@ const feed = new Feed({ store, vault, client, graceMs: feedSettings.graceMs, sta
 // was just confirmed has customers to pay, and a settlement that was reset has a result to post again.
 feed.subscribe((event) => {
   if ((event.event === "Finalized" && event.outcomeYes) || event.event === "SettlementReset") keeper.nudge();
+  // A new promo: the price its quote was made on becomes the first point of its chart.
+  if (event.event === "PromoCreated" && event.nonce && event.promoId !== null) odds.start(event.promoId, event.nonce, event.at);
 });
 const streamSecret = config.streamSecret();
 if (streamSecret === undefined) console.log("[feed] QUICKNODE_STREAM_SECRET is not set: POST /stream refuses every delivery");
@@ -73,6 +78,7 @@ const app = makeApp({
   oracle: keeper.address,
   store,
   feed,
+  odds,
   testKey: config.claimTestKey(),
   streamSecret,
 });

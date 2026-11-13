@@ -1,11 +1,13 @@
 // What the keeper remembers between restarts, in one JSON file. The chain is the source of truth for
 // promos and money; this file only holds what the chain does not: the plain strings behind the hashes
 // in a promo, the quotes that are still usable, which logins have claimed, what each promo gives away and
-// for which shop, the keeper's own tx hashes, and the vault's events as the pages' feed.
+// for which shop, the keeper's own tx hashes, the vault's events as the pages' feed, and how each promo's
+// chance has moved.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Address, Hex } from "viem";
 import type { Label, PendingLabel } from "./labels.ts";
+import type { OddsPoint } from "./odds.ts";
 import type { FeedEvent } from "./stream.ts";
 
 /** `game`, `league` and `startTime` are the words for the card (names.ts); older records lack them. */
@@ -45,6 +47,12 @@ type Data = {
   pendingLabels: Record<Hex, PendingLabel>;
   /** promo id => what is free and the shop's name. */
   promoLabels: Record<string, Label>;
+  /** promo id => the readings of its contract's book on Gemini since the promo started, oldest first (odds.ts). */
+  odds: Record<string, OddsPoint[]>;
+  /** promo id => the reading the promo was priced on, at the time the promo started. */
+  oddsStart: Record<string, OddsPoint>;
+  /** quote nonce => the reading that quote was priced on, until the quote's promo exists. */
+  pendingOdds: Record<Hex, OddsPoint>;
   /** The most recent transactions the keeper and the relayer sent. */
   txs: TxRecord[];
   /** The vault's events, from the QuickNode Stream and from the keeper's own read of the chain (stream.ts). */
@@ -67,6 +75,9 @@ const empty = (): Data => ({
   claims: {},
   pendingLabels: {},
   promoLabels: {},
+  odds: {},
+  oddsStart: {},
+  pendingOdds: {},
   txs: [],
   feed: { events: [], cursor: null, deliveries: 0, lastDeliveryAt: null },
 });

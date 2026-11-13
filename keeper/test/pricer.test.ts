@@ -287,6 +287,14 @@ test("getPrice_game_carriesTheWordsForTheCard", async () => {
   assert.equal(p.rule, "If Minnesota wins, this market will resolve to Yes.");
 });
 
+test("signQuote_thePriceTheQuoteWasMadeOn_isKeptUnderItsNonce_forThePromosChart", async () => {
+  const { pricer, store } = setup(game());
+  const res = await pricer.signQuote({ ...wings, merchant: MERCHANT });
+  // The time Gemini was read, the chance the price was made on (the ask), the bid and the ask.
+  assert.deepEqual(store.data.pendingOdds[res.quote.nonce], [NOW, 3900, 3800, 3900]);
+  assert.equal(res.breakdown.chance, 0.39);
+});
+
 test("signQuote_label_isKeptUnderTheQuotesNonce", async () => {
   const { pricer, store } = setup(game());
   const res = await pricer.signQuote({ ...wings, merchant: MERCHANT, label: { item: "Wings", business: "Tony's Pizza" } });
