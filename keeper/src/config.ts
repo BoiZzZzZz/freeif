@@ -68,6 +68,17 @@ export const feedSettings = () => ({
   startBlock: optional("FEED_START_BLOCK") === undefined ? undefined : int("FEED_START_BLOCK", 0),
 });
 
+/**
+ * Gemini's sandbox exchange, where the keeper places each promo's hedge order. Null without a key: every
+ * hedge is then written down as simulated.
+ */
+export function geminiSandbox(): { key: string; secret: string; base: string } | null {
+  const key = optional("GEMINI_SANDBOX_KEY");
+  const secret = optional("GEMINI_SANDBOX_SECRET");
+  if (key === undefined || secret === undefined) return null;
+  return { key, secret, base: optional("GEMINI_SANDBOX_BASE") ?? "https://api.sandbox.gemini.com" };
+}
+
 /** Pricing settings (SPEC section 2). All of them can be changed without a deploy. */
 export function pricingParams(): PricingParams {
   return {

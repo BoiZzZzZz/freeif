@@ -23,7 +23,7 @@ Built for the UBC Hackathon 2026 (DeFi track). Work in progress: this README gro
 
 ## How Gemini is used
 
-Gemini's prediction markets supply three things: the price of a promo, the picture of how that price moves, and the result. All of it is public market data read by the keeper (`keeper/src/gemini.ts`); no key is needed.
+Gemini's prediction markets supply three things: the price of a promo, the picture of how that price moves, and the result. All of that is public market data read by the keeper (`keeper/src/gemini.ts`); no key is needed. The fourth use is a trade: the keeper places each promo's hedge as an order on Gemini's sandbox exchange (`keeper/src/hedge.ts`).
 
 | What for | Route | What is read |
 |---|---|---|
@@ -31,9 +31,11 @@ Gemini's prediction markets supply three things: the price of a promo, the pictu
 | The price of a promo | `GET /v1/prediction-markets/events/{eventTicker}` | The event's `status`; the contract's `marketState`, `prices.bestBid`, `prices.bestAsk`, `prices.lastTradePrice`, `expiryDate`, and `description` (the rule the result is decided by, shown word for word under Proof) |
 | How the chance has moved | `GET /v1/book/{instrumentSymbol}?limit_bids=1&limit_asks=1`, every 30 seconds for each open promo | The best bid and the best ask. The promo page draws them as its chart, from the price the promo was sold at to the newest reading (`GET /promos/:id/odds` on the keeper) |
 | The result | `GET /v1/prediction-markets/events/{eventTicker}` once the promo has stopped taking customers | The contract's `resolutionSide`, `yes` or `no`, and the event's `id` |
+| The hedge | `POST /v1/prediction-markets/order` and `/order/cancel` on the sandbox exchange, with a sandbox API key | For each open promo, a limit order to buy "yes" on its contract: one contract per dollar of payout, at the price the promo was sold on. The order id shows on `/lp` and under Proof |
 
 - **The price.** A promo costs `ask × payout × customers`, plus 5%. The ask is used because it is what a hedge would cost. That holds while the book is a market: someone on each side, at most half a dollar apart. A book with a side missing is priced on the highest price it shows with 15% on top, and only if the result has traded; an offer with nobody on the other side and no trade behind it is not a price. The rules are in [`keeper/README.md`](keeper/README.md), "Pricing rules".
 - **The result, and how to check it.** The vault stores the hash of Gemini's event id and of the contract's symbol when the promo is created. `settle(promoId, outcomeYes, eventId, resolutionSide)` reverts unless the event id it is given hashes to the stored one, so a result can only be posted for the event the promo was sold on. To check a promo: open its page, open Proof, follow "Gemini event" to Gemini's own answer for that event, and compare the contract's `resolutionSide` with the `Settled` event of "Settlement on Arc".
+- **The hedge.** A "yes" contract pays $1 if the result happens, so buying one for every dollar a promo can pay is the other side of the vault's position. The keeper places that order through Gemini's trading API on the sandbox exchange and keeps its id with the promo. The sandbox lists crypto and commodity markets only, so a promo on a game shows the order the keeper would place, marked simulated. No money moves either way: the vault has no path to Gemini, and that is roadmap. Details in [`keeper/README.md`](keeper/README.md), "The hedge".
 - **One contract per promo.** A promo names exactly one Gemini contract. Nothing in the vault or the pricing assumes sports: the test loop runs on 5-minute BTC markets.
 
 ## The QuickNode Stream

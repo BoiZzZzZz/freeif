@@ -71,6 +71,8 @@ function setup() {
   // Readings of Gemini's book: the open promo's, and one left over from the promo that ended "no".
   store.data.odds["0"] = [[1794590000, 3900, 3800, 3900], [1794590030, 4100, 3900, 4100]];
   store.data.odds["1"] = [[1794590000, 6000, 5800, 6000]];
+  // The open promo's hedge: the order the keeper would place, since the sandbox does not list a game.
+  store.data.hedges["0"] = { kind: "simulated", symbol: "GEMI-X", quantity: "96", price: "0.39", at: 1794590010, reason: "Gemini's sandbox does not list this contract." };
   const feed = new Feed({ store, vault: VAULT, log: () => undefined });
   const odds = new Odds({ store, everySeconds: 30 });
   const unused = {} as never;
@@ -88,7 +90,7 @@ type Vault = {
   maxExposureBps: number;
   maxLockedBps: number;
   netEarned: string;
-  promos: Array<{ promoId: string; status: string; item: string | null; game: string | null; condition: string | null; premium: string; maxPayout: string; locked: string; net: string | null; chance: number | null }>;
+  promos: Array<{ promoId: string; status: string; item: string | null; game: string | null; condition: string | null; premium: string; maxPayout: string; locked: string; net: string | null; chance: number | null; hedge: { kind: string; quantity: string; price: string } | null }>;
   events: unknown[];
 };
 
@@ -129,6 +131,13 @@ test("getVault_anOpenPromo_carriesTheChanceAtItsNewestReading_andAPromoWithAResu
   const { app } = setup();
   const v = (await (await app.request("/vault")).json()) as Vault;
   assert.deepEqual(v.promos.map((p) => p.chance), [0.41, null, null, null]);
+});
+
+test("getVault_aPromo_carriesItsHedge_orNull", async () => {
+  const { app } = setup();
+  const v = (await (await app.request("/vault")).json()) as Vault;
+  assert.deepEqual([v.promos[0]!.hedge?.kind, v.promos[0]!.hedge?.quantity, v.promos[0]!.hedge?.price], ["simulated", "96", "0.39"]);
+  assert.equal(v.promos[1]!.hedge, null);
 });
 
 test("getVault_manyRequests_readTheChainOnce_untilAnEventArrives", async () => {

@@ -9,6 +9,7 @@ import type { Address, Hex } from "viem";
 import type { Label, PendingLabel } from "./labels.ts";
 import type { OddsPoint } from "./odds.ts";
 import type { FeedEvent } from "./stream.ts";
+import type { Hedge } from "./hedge.ts";
 
 /** `game`, `league` and `startTime` are the words for the card (names.ts); older records lack them. */
 export type EventRecord = {
@@ -53,6 +54,8 @@ type Data = {
   oddsStart: Record<string, OddsPoint>;
   /** quote nonce => the reading that quote was priced on, until the quote's promo exists. */
   pendingOdds: Record<Hex, OddsPoint>;
+  /** promo id => its hedge: an order on Gemini's sandbox exchange, or the order the keeper would place (hedge.ts). */
+  hedges: Record<string, Hedge>;
   /** The most recent transactions the keeper and the relayer sent. */
   txs: TxRecord[];
   /** The vault's events, from the QuickNode Stream and from the keeper's own read of the chain (stream.ts). */
@@ -78,6 +81,7 @@ const empty = (): Data => ({
   odds: {},
   oddsStart: {},
   pendingOdds: {},
+  hedges: {},
   txs: [],
   feed: { events: [], cursor: null, deliveries: 0, lastDeliveryAt: null },
 });

@@ -395,6 +395,8 @@ export function makeApp(d: Deps): Hono {
         settledAt: Number(p.settledAt),
         outcomeYes: p.outcomeYes,
         net: net === null ? null : net.toString(),
+        /** The promo's hedge: an order on Gemini's sandbox exchange, or the order the keeper would place. */
+        hedge: d.store.data.hedges[raw] ?? null,
         /** The chance of "yes" at the newest reading of Gemini's book, while the promo has no result. */
         chance: p.status === Status.Open ? (d.odds?.chance(raw)?.chance ?? null) : null,
       };
@@ -542,6 +544,8 @@ export function makeApp(d: Deps): Hono {
       settledAt: Number(p.settledAt),
       outcomeYes: p.outcomeYes,
       hedgeMode: p.hedgeMode,
+      /** The promo's hedge: an order on Gemini's sandbox exchange, or the order the keeper would place. Null until it is made. */
+      hedge: d.store.data.hedges[raw] ?? null,
       /** What the keeper and the relayer sent for this promo, oldest first. */
       txs: d.store.data.txs.filter((t) => t.promoId === raw).map(({ at, action, hash }) => ({ at, action, hash })),
       /** The promo's events on the vault, oldest first, each with how it reached the keeper (`via`). */

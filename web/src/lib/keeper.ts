@@ -141,6 +141,26 @@ export type FeedEvent = {
   outcomeYes?: boolean;
 };
 
+/**
+ * A promo's hedge. "sandbox" is an order the keeper placed on Gemini's sandbox exchange; "simulated" is
+ * the order it would place, for a contract the sandbox does not list.
+ */
+export type Hedge = {
+  kind: "sandbox" | "simulated";
+  /** The contract's instrument symbol. */
+  symbol: string;
+  /** Contracts to buy: one pays $1 on a "yes", so it is the promo's full payout in dollars. */
+  quantity: string;
+  /** The limit price, as Gemini writes prices: "0.43". */
+  price: string;
+  at: number;
+  orderId?: string;
+  /** "open" while it rests; "cancelled" or "closed" once the promo is over. */
+  status?: string;
+  reason?: string;
+  closedAt?: number;
+};
+
 export type Promo = {
   promoId: string;
   status: PromoStatus;
@@ -170,6 +190,8 @@ export type Promo = {
   settledAt: number;
   outcomeYes: boolean;
   hedgeMode: boolean;
+  /** The promo's hedge. Null until the keeper has made it. */
+  hedge?: Hedge | null;
   /** The promo's events on the vault, oldest first. */
   events: FeedEvent[];
   /** The QuickNode Stream's record: deliveries so far, and when the last one came (unix seconds). */
@@ -218,6 +240,8 @@ export type VaultPromo = {
   outcomeYes: boolean;
   /** What the vault made on it: the premium less what its customers get. Null until it has a final result. */
   net: string | null;
+  /** The promo's hedge. Null when it has none. */
+  hedge?: Hedge | null;
   /** The chance of "yes" at the keeper's newest reading (0.41 is 41%). Null once the promo has a result, or with no reading. */
   chance: number | null;
 };

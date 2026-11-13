@@ -8,7 +8,7 @@ The FreeIf app: Next.js 16 (App Router), React 19, Tailwind 4, viem, `qrcode.rea
 | `/claim/[promoId]` | A customer at the counter scans the code, types an email and a 6-digit code, and is covered |
 | `/promo/[id]` | The merchant's dashboard and the public status page: one status sentence, three numbers, the counter code (replaced by a three-step timeline with real times once there is a result), a live feed, a chart of how the chance has moved since the promo started, proof |
 | `/promo/[id]/print` | The counter sign with the code, printed from the browser |
-| `/lp` | A liquidity provider: what the vault holds, how much of it is locked, what it has earned, both share prices, deposit and withdraw, every promo with what it locks and what it made, each open promo's chance now, the risks, and the vault's activity |
+| `/lp` | A liquidity provider: what the vault holds, how much of it is locked, what it has earned, both share prices, deposit and withdraw, every promo with what it locks and what it made, each open promo's chance now and its hedge order, the risks, and the vault's activity |
 
 Merchant and customer screens never say prediction market, USDC, wallet or gas. `/lp` is the one page that does, and the one page that uses a browser wallet (MetaMask and the like) instead of the email login. The footer link "See how it works under the hood" (or `?mechanics=1` in a link) turns on the mechanics view, which shows where each number comes from.
 

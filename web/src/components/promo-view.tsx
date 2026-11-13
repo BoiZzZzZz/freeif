@@ -316,6 +316,14 @@ function Proof({ promo, open }: { promo: Promo; open: boolean }) {
             </span>
           )}
         </ProofRow>
+        {/* The hedge is mechanics: it shows only in the mechanics view. */}
+        {open && promo.hedge && (
+          <ProofRow label="The hedge">
+            {promo.hedge.kind === "sandbox"
+              ? `The keeper placed order ${promo.hedge.orderId} on Gemini's sandbox exchange: buy ${promo.hedge.quantity} "yes" of ${promo.hedge.symbol} at ${promo.hedge.price} or better (${promo.hedge.status ?? "open"}). One contract pays $1 on a "yes", so these pay what the vault would owe. It is a sandbox order: it shows the trade and moves no money.`
+              : `Simulated: on Gemini the keeper would buy ${promo.hedge.quantity} "yes" of ${promo.hedge.symbol} at ${promo.hedge.price} or better, one contract for every dollar this promo can pay. ${promo.hedge.reason ?? ""}`}
+          </ProofRow>
+        )}
         <ProofRow label="The feed">
           {byStream > 0
             ? `Delivered by QuickNode Streams: ${byStream} of this promo's ${promo.events.length} events came from a Stream on Arc Testnet that watches the vault's logs and posts them to the keeper. The keeper read the rest from the chain.`

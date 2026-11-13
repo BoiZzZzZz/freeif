@@ -6,6 +6,7 @@ import { makePublicClient, makeWalletClient } from "./chain.ts";
 import { makeIdentify } from "./circle.ts";
 import * as config from "./config.ts";
 import { Games } from "./games.ts";
+import { Hedger, Sandbox } from "./hedge.ts";
 import { Keeper } from "./keeper.ts";
 import { Odds } from "./odds.ts";
 import { Pricer } from "./pricer.ts";
@@ -50,7 +51,11 @@ const pricer = new Pricer({
 });
 // How each promo's chance moves: a reading of Gemini's book on every pass of the loop.
 const odds = new Odds({ store, everySeconds: Math.round(timing.loopMs / 1000) });
-const keeper = new Keeper({ client, wallet: oracleWallet, vault, store, odds });
+// Each promo's hedge: an order on Gemini's sandbox exchange, placed and cancelled by the loop.
+const sandboxSettings = config.geminiSandbox();
+if (sandboxSettings === null) console.log("[hedge] GEMINI_SANDBOX_KEY is not set: every hedge is written down as simulated");
+const hedge = new Hedger({ store, sandbox: sandboxSettings === null ? null : new Sandbox(sandboxSettings) });
+const keeper = new Keeper({ client, wallet: oracleWallet, vault, store, odds, hedge });
 const games = new Games({ spreadBps: config.pricingParams().spreadBps, minLeadSeconds: timing.minClaimWindowSeconds });
 
 // The vault's events: delivered by the QuickNode Stream to `POST /stream`, and read from the chain by

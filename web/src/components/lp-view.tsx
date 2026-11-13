@@ -12,7 +12,7 @@ import { explorerAddress, explorerTx, FEE_BUFFER } from "@/lib/config";
 import { follow } from "@/lib/events";
 import { dayTime, parseDollars, pct, shortAddress, usd } from "@/lib/format";
 import { connect, connected, deposit, injected, onAccount, position, withdraw, type Position } from "@/lib/injected";
-import { keeper, type FeedEvent, type Vault, type VaultPromo } from "@/lib/keeper";
+import { keeper, type FeedEvent, type Hedge, type Vault, type VaultPromo } from "@/lib/keeper";
 import { useNow } from "@/lib/use-now";
 
 type Address = `0x${string}`;
@@ -197,9 +197,9 @@ export function LpView() {
         {open.length === 0 ? (
           <Empty>No promo is open. Nothing is locked.</Empty>
         ) : (
-          <Table head={["Promo", "Locked", "Premium", "Chance / break‑even", "State"]}>
+          <Table columns={OPEN_COLUMNS} head={["Promo", "Locked", "Premium", "Chance / break‑even", "State", "Hedge"]}>
             {open.map((p) => (
-              <Row key={p.promoId} id={p.promoId} name={promoName(p)}>
+              <Row key={p.promoId} columns={OPEN_COLUMNS} id={p.promoId} name={promoName(p)}>
                 <Cell label="Locked">{usd(p.locked)}</Cell>
                 <Cell label="Premium">{usd(p.premium)}</Cell>
                 {/* The chance of "yes" now, from Gemini's ask, next to the chance at which the premium exactly pays for the payout. */}
@@ -207,6 +207,9 @@ export function LpView() {
                   {p.chance === null ? "–" : pct(p.chance)} / {percent(big(p.premium), big(p.maxPayout))}
                 </Cell>
                 <Cell label="State">{openState(p, now)}</Cell>
+                <Cell label="Hedge">
+                  <HedgeCell hedge={p.hedge} />
+                </Cell>
               </Row>
             ))}
           </Table>
@@ -251,7 +254,12 @@ export function LpView() {
             The {vault.maxExposureBps / 100}% limit is per promo and is in the contract. The {vault.maxLockedBps / 100}% ceiling across promos
             is enforced by the pricing service, not by the contract.
           </li>
-          <li>Nothing is hedged: every promo is the vault&apos;s direct position against the outcome.</li>
+          <li>
+            A hedge here is an order on Gemini&apos;s sandbox exchange: for each open promo the keeper buys &ldquo;yes&rdquo; on the promo&apos;s
+            contract, one contract per dollar of payout, at the price the promo was sold on. The sandbox lists crypto and commodity markets
+            only, so for a game the page shows the order the keeper would place, marked simulated. Neither moves money: every promo is the
+            vault&apos;s direct position against the outcome.
+          </li>
           <li>This is Arc testnet. The USDC here is test money.</li>
         </ul>
         <p className="num mt-2 break-all text-[12px] text-ink/60">
@@ -271,7 +279,7 @@ export function LpView() {
 function Frame({ children }: { children: React.ReactNode }) {
   return (
     <>
-      <main className="mx-auto w-full max-w-[760px] flex-1 px-4 pt-6">{children}</main>
+      <main className="mx-auto w-full max-w-[860px] flex-1 px-4 pt-6">{children}</main>
       <SiteFooter />
     </>
   );
@@ -292,11 +300,27 @@ const Empty = ({ children }: { children: React.ReactNode }) => (
 
 const COLUMNS = "md:grid md:grid-cols-[minmax(0,1fr)_96px_96px_128px_150px] md:items-baseline md:gap-3";
 
+/** The open promos have one column more: the hedge. */
+const OPEN_COLUMNS = "md:grid md:grid-cols-[minmax(0,1fr)_84px_84px_128px_124px_136px] md:items-baseline md:gap-3";
+
+/** A promo's hedge in a cell: what kind it is, then the order's id or the order that would be placed. */
+function HedgeCell({ hedge }: { hedge: Hedge | null | undefined }) {
+  if (!hedge) return <>–</>;
+  return (
+    <>
+      {hedge.kind === "sandbox" ? `Sandbox, ${hedge.status ?? "open"}` : "Simulated"}
+      <span className="block break-all text-[11px] text-ink/60">
+        {hedge.kind === "sandbox" ? `#${hedge.orderId}` : `buy ${hedge.quantity} at ${hedge.price}`}
+      </span>
+    </>
+  );
+}
+
 /** A table on a wide screen; under 768px each row is a small card with its labels. */
-function Table({ head, children }: { head: string[]; children: React.ReactNode }) {
+function Table({ head, children, columns = COLUMNS }: { head: string[]; children: React.ReactNode; columns?: string }) {
   return (
     <div className="divide-y divide-line rounded-[10px] border border-line bg-card">
-      <div className={`hidden px-4 py-2 ${COLUMNS}`}>
+      <div className={`hidden px-4 py-2 ${columns}`}>
         {head.map((title) => (
           <span key={title} className="label">
             {title}
@@ -308,9 +332,9 @@ function Table({ head, children }: { head: string[]; children: React.ReactNode }
   );
 }
 
-function Row({ id, name, children }: { id: string; name: string; children: React.ReactNode }) {
+function Row({ id, name, children, columns = COLUMNS }: { id: string; name: string; children: React.ReactNode; columns?: string }) {
   return (
-    <div className={`px-4 py-3 text-[15px] ${COLUMNS}`}>
+    <div className={`px-4 py-3 text-[15px] ${columns}`}>
       <Link className="block truncate font-medium underline underline-offset-2 md:font-normal" href={`/promo/${id}`}>
         {name}
       </Link>

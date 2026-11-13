@@ -6,6 +6,7 @@ import { keccak256, parseEventLogs, toBytes, type Address, type Hex } from "viem
 import { promoVaultAbi } from "./abi.ts";
 import { Status, explorerTx, statusName, type PublicClient, type WalletClient } from "./chain.ts";
 import { getEvent, listEvents, type GeminiContract, type GeminiEvent } from "./gemini.ts";
+import type { HedgePromo } from "./hedge.ts";
 import type { OpenPromo } from "./odds.ts";
 import { revertName } from "./relayer.ts";
 import { sleep } from "./sleep.ts";
@@ -19,6 +20,8 @@ type Deps = {
   store: Store;
   /** Takes a reading of Gemini's book for every promo that is waiting for its result (odds.ts). */
   odds?: { sample: (promos: readonly OpenPromo[]) => Promise<unknown> };
+  /** Places a hedge order for each open promo and cancels it when the promo is over (hedge.ts). */
+  hedge?: { sync: (promos: readonly HedgePromo[]) => Promise<unknown> };
   log?: (line: string) => void;
 };
 
@@ -30,6 +33,8 @@ type Promo = {
   merchant: Address;
   geminiEventId: Hex;
   instrumentSymbol: Hex;
+  payoutPerClaim: bigint;
+  maxClaims: number;
   claimCount: number;
   claimDeadline: bigint;
   settledAt: bigint;
@@ -95,6 +100,14 @@ export class Keeper {
       if (status === Status.Open) open.push({ promoId: id.toString(), instrumentSymbol });
     }
     void this.#d.odds?.sample(open);
+    // The hedge orders, for every promo this pass read: one placed for an open promo that has none, one
+    // cancelled for a promo that is over. Not waited for either.
+    void this.#d.hedge?.sync(
+      ids.map((id, i) => {
+        const { status, payoutPerClaim, maxClaims, instrumentSymbol } = promos[i] as Promo;
+        return { promoId: id.toString(), status, payoutPerClaim, maxClaims, instrumentSymbol };
+      }),
+    );
 
     let sent = 0;
     for (const [i, id] of ids.entries()) {
