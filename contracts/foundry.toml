@@ -18,3 +18,9 @@ runs = 512
 
 [fmt]
 line_length = 110
+
+[invariant]
+runs = 96
+depth = 128
+# Handler actions skip when there is nothing legal to do, so any revert is a real failure.
+fail_on_revert = true
