@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+/* The look (prep/WIREFRAMES.md section 5): paper, white cards, ink buttons, one green. No dark mode. */
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@theme {
+  --color-paper: #faf7f0;
+  --color-card: #ffffff;
+  --color-line: #e7e2d6;
+  --color-ink: #010304;
+  /* Green means Covered or Paid and nothing else. Red is for errors only. */
+  --color-go: #11a642;
+  --color-go-tint: #cfedd9;
+  --color-stop: #ca3a3a;
+  --color-stop-tint: #fedada;
+}
+
+html,
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
+
+body {
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+@layer components {
+  /* Small uppercase mono labels: GAME, KICKOFF, YOUR PRICE. */
+  .label {
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+    font-size: 12px;
+    line-height: 16px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: color-mix(in srgb, var(--color-ink) 60%, transparent);
+  }
+
+  /* Every amount, percentage and time. */
+  .num {
+    font-family: var(--font-geist-mono), ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* The one animation in the app: the card turning over to Paid, once. */
+.flip {
+  perspective: 1200px;
+}
+.flip-inner {
+  position: relative;
+  transform-style: preserve-3d;
+}
+.flip-face {
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+.flip-back {
+  position: absolute;
+  inset: 0;
+  transform: rotateY(180deg);
+}
+.flip-inner.is-flipped {
+  transform: rotateY(180deg);
+  animation: card-flip 600ms ease-in-out 1 both;
+}
+@keyframes card-flip {
+  from {
+    transform: rotateY(0deg);
+  }
+  to {
+    transform: rotateY(180deg);
+  }
+}
+
+/* New feed rows fade in. Nothing else moves. */
+.fade-in {
+  animation: fade-in 300ms ease-out 1 both;
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* The bar that runs down while a price is held. */
+@keyframes run-down {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flip-inner.is-flipped,
+  .fade-in {
+    animation: none;
+  }
+}
+
+@media print {
+  html,
+  body {
+    background: #ffffff;
+  }
+  .no-print {
+    display: none !important;
+  }
+}

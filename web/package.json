@@ -1,0 +1,34 @@
+{
+  "name": "freeif-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "next typegen && tsc --noEmit",
+    "abi": "node scripts/copy-abi.mjs",
+    "check:pay": "tsx --tsconfig tsconfig.json scripts/pay-check.ts"
+  },
+  "dependencies": {
+    "@circle-fin/w3s-pw-web-sdk": "1.1.11",
+    "next": "16.4.6",
+    "qrcode.react": "^4.2.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "viem": "^2.57.19"
+  },
+  "devDependencies": {
+    "@tailwindcss/turbopack": "4.3.3",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.6",
+    "tailwindcss": "4.3.3",
+    "tsx": "^4.23.15",
+    "typescript": "^5"
+  },
+  "packageManager": "pnpm@12.15.0"
+}
