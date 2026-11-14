@@ -2,7 +2,7 @@
 
 // Cash out (prep/WIREFRAMES.md section 8): a sheet that sends the account's balance to an address the
 // person types. It is the only place a customer can meet an address, and only if they ask. Paying out
-// to a bank or a card is not built; this demo pays in test dollars.
+// to Venmo or a bank is not built; this demo pays in test dollars.
 import { useEffect, useState, type FormEvent } from "react";
 import { EmailStep } from "@/components/email-step";
 import { useMechanics } from "@/components/mechanics";
@@ -175,7 +175,7 @@ export function CashOut({ open, onClose, address, onSent }: Props) {
             {sendable > 0n ? `Send ${usd(sendable)}` : "Send"}
           </Button>
           <p className="text-[14px] text-ink/60">
-            A few cents stay in your account for the processing fee. Cash out to a bank or card is coming. This demo pays in test dollars.
+            A few cents stay in your account for the processing fee. Cash out to Venmo or your bank is coming. This demo pays in test dollars.
           </p>
         </form>
       )}

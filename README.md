@@ -239,7 +239,7 @@ The Stream is made, tested, paused and removed by one script, `keeper/scripts/st
 3. **Less trust.** The cap across promos in the contract. A second reporter and a dispute oracle for results. A multisig owner with a timelock.
 4. **Cards from the till.** A point-of-sale integration that prints the claim card on the receipt, so only a purchase gets one.
 5. **More to cover.** Any market Gemini lists can be a promo or a cover; the form offers five sports leagues and daily temperatures today.
-6. **Money out.** Cash out sends test dollars to an address (built, and checked by simulation; not yet run with a real login). A bank or a card comes with a payments partner.
+6. **Money out.** Cash out sends test dollars to an address (built, and checked by simulation; not yet run with a real login). Venmo or a bank account comes with a payments partner: PayPal's Payouts API pays a Venmo handle or US phone number, and an off-ramp such as Bridge pays a bank account by ACH. The vault and the payouts stay on Arc; only that last step is new.
 7. **A pilot.** A handful of bars and pizza shops for one season, with a licensed prize-indemnity carrier behind the vault.
 
 ## Run the contract tests
