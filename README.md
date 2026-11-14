@@ -7,7 +7,7 @@ Built for the UBC Hackathon 2026 (DeFi track), by one person, starting Nov 12. I
 | | |
 |---|---|
 | Try it | [`https://freeif.app/merchant`](https://freeif.app/merchant) (add `?mechanics=1` to see where each number comes from). Paying for a promo needs test USDC in the account your email login makes: the Pay sheet shows the account's address, and [Circle's faucet](https://faucet.circle.com) sends test USDC on Arc Testnet |
-| The contract | [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d) on Arc testnet, verified |
+| The contract | [`0x828295d7213DBA6eB281354d61801082006f72e6`](https://explorer.testnet.arc.io/address/0x828295d7213DBA6eB281354d61801082006f72e6) on Arc testnet, verified |
 | Sponsor sections | [How Arc is used](#how-arc-is-used) · [How Gemini is used](#how-gemini-is-used) · [The QuickNode Stream](#the-quicknode-stream) |
 | For the track | [Economic design](#economic-design) · [Risks and assumptions](#risks-and-assumptions) |
 
@@ -32,7 +32,7 @@ Each card is its own small account on Arc. Its key is made in the shop's browser
 
 Behind it is a vault of USDC on Arc. Liquidity providers fund it ([`/lp`](https://freeif.app/lp)); every promo's whole payout is locked in it until the result; the price of a promo is what its hedge would cost on Gemini's prediction market, plus 5%.
 
-The same contract also pays the shop itself. "My business gets paid" on the form sells a cover: a fixed amount to the business if a day's high temperature in its city lands in a range it picks, priced from Gemini's daily temperature markets. [Promo 21](https://freeif.app/promo/21) is the first: $2.00 to a test shop if the high in Austin on November 14 is 66°F or below, for $0.80.
+The same contract also pays the shop itself. "My business gets paid" on the form sells a cover: a fixed amount to the business if a day's high temperature in its city lands in a range it picks, priced from Gemini's daily temperature markets. Promo 21 on the first vault was the first: $2.00 to a test shop if the high in Austin on November 14 is 66°F or below, for $0.80.
 
 Merchant and customer screens never say prediction market, USDC, wallet or gas. One switch (`?mechanics=1`, or the link in the footer) shows what is under each number: the Gemini contract and its order book, the signed quote, the transactions on Arc, how each event reached the page.
 
@@ -82,12 +82,12 @@ flowchart TB
 
 | | |
 |---|---|
-| Vault | [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d) on Arc testnet (chain 5042002), verified |
+| Vault | [`0x828295d7213DBA6eB281354d61801082006f72e6`](https://explorer.testnet.arc.io/address/0x828295d7213DBA6eB281354d61801082006f72e6) on Arc testnet (chain 5042002), verified. The first vault, [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d), ran every promo until Nov 15; its pause also blocked claims |
 | App | [`https://freeif.app`](https://freeif.app): [`/merchant`](https://freeif.app/merchant) sets up a promo, `/promo/[id]/cards` prints its claim cards, `/card/[id]` is a scanned card, `/claim/[id]` covers a customer on a promo with a code at the counter, `/promo/[id]` is its status page, [`/lp`](https://freeif.app/lp) is the vault for liquidity providers. Add `?mechanics=1` to see where each number comes from. Details in [`web/README.md`](web/README.md) |
 | Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
-| First payout | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
-| So far (Nov 13) | 22 promos created. 19 have run to their end: 9 paid their customers, 10 ended "no". Three are open: two on Sunday's Patriots at Lions game and one on Saturday's high in Austin |
-| Settings on the vault | `maxExposureBps` 2000 (20%), `disputeWindow` one hour, `voidGrace` 7 days: the contract's defaults. Promos 0 to 22 ran with test values (30 seconds and 60 seconds) until Nov 13, 21:24 UTC. The owner is one account, the deployer |
+| First payout (first vault) | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
+| First vault, so far (Nov 13) | 22 promos created. 19 have run to their end: 9 paid their customers, 10 ended "no". Three are open: two on Sunday's Patriots at Lions game and one on Saturday's high in Austin |
+| Settings on the vault | `maxExposureBps` 2000 (20%), `disputeWindow` one hour, `voidGrace` 7 days: the contract's defaults, never changed. The owner is one account, the deployer. On the first vault, promos 0 to 22 ran with test values (30 seconds and 60 seconds) until Nov 13, 21:24 UTC |
 | Demo video | Added with the submission |
 
 ## Economic design
@@ -109,7 +109,7 @@ flowchart TB
 | No more than 60% of the vault may be locked, counting quotes that are signed and still usable | The pricing service | Many promos doing it together. The contract has no cap across promos |
 | The premium may not exceed the payout | Both | Selling a result that is nearly certain |
 
-**Collateral.** `lockedCollateral` is the sum of every promo's lock plus payouts that failed and wait. Every function that moves USDC keeps `balance >= lockedCollateral`, and a withdrawal is priced on `balance - lockedCollateral`, so a liquidity provider leaving can never reach a promo's payout. This is the property the tests lean on hardest: 238 unit and fuzz tests, and two stateful invariant runs, each with its own handler (the second written in a review before the contract freeze), that make random calls and check it after every one.
+**Collateral.** `lockedCollateral` is the sum of every promo's lock plus payouts that failed and wait. Every function that moves USDC keeps `balance >= lockedCollateral`, and a withdrawal is priced on `balance - lockedCollateral`, so a liquidity provider leaving can never reach a promo's payout. This is the property the tests lean on hardest: 252 unit and fuzz tests, and two stateful invariant runs, each with its own handler (the second written in a review before the contract freeze), that make random calls and check it after every one.
 
 **Shares.** Liquidity providers hold proportional shares, and there are two prices.
 
@@ -120,7 +120,7 @@ flowchart TB
 
 **The hedge.** A "yes" contract pays $1, so one contract per dollar of payout is the other side of the vault's position. In the worked example the full hedge costs $1,560 of the $1,638 premium and leaves the $78 spread, with basis risk in place of the promo's risk. For every open promo the keeper works out that order. Where Gemini's sandbox exchange lists the contract (crypto and commodity markets) it places the order and keeps its id with the promo; for a game or a temperature market, which the sandbox does not list, it records the order it would place, marked simulated. The three promos open on Nov 13 are simulated; four test promos on BTC markets had real sandbox orders. Either way no money moves, and the vault as built carries each promo's risk itself. Moving USDC to Gemini and back is not built.
 
-**What the vault has done.** On Nov 13 it held $65.58 with $26.00 locked for three open promos, and was up $3.74 on the 19 promos that had finished (premiums kept, less payouts). The page has the numbers as they are now.
+**What the vault has done.** On Nov 13 the first vault held $65.58 with $26.00 locked for three open promos, and was up $3.74 on the 19 promos that had finished (premiums kept, less payouts). The page has the numbers as they are now.
 
 ## Risks and assumptions
 
@@ -162,7 +162,7 @@ The vault, every promo and every payout are on Arc testnet (chain 5042002). What
 - **Accounts by email.** Merchants and customers log in with an email code; their accounts are Circle user-controlled wallets on Arc. Only the vault's page for liquidity providers uses a browser wallet.
 - **Fast enough to watch.** Blocks came every 0.5 to 1.1 seconds on the days measured, with one slow hour at 2 to 3 seconds.
 
-The contract is verified on Arc's explorer: [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d). One thing to know when reading it: as the gas token USDC has 18 decimals, and through its ERC-20 interface, which the vault uses, it has 6.
+The contract is verified on Arc's explorer: [`0x828295d7213DBA6eB281354d61801082006f72e6`](https://explorer.testnet.arc.io/address/0x828295d7213DBA6eB281354d61801082006f72e6). One thing to know when reading it: as the gas token USDC has 18 decimals, and through its ERC-20 interface, which the vault uses, it has 6.
 
 ## How Gemini is used
 
@@ -218,7 +218,7 @@ What happens when the Stream is late or off: the keeper also reads the vault's l
 
 The filter is tested as it runs, against real blocks of the deployed vault, and its topic hashes are checked against the ABI (`keeper/test/stream.test.ts`). More in [`keeper/README.md`](keeper/README.md), "The feed".
 
-What was measured on Nov 13, on the first four promos run with the Stream on ([17](https://freeif.app/promo/17?mechanics=1), [18](https://freeif.app/promo/18?mechanics=1), [19](https://freeif.app/promo/19?mechanics=1) and [20](https://freeif.app/promo/20?mechanics=1), each on a 5-minute BTC market):
+What was measured on Nov 13, on the first four promos run with the Stream on (17, 18, 19 and 20 on the [first vault](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d), each on a 5-minute BTC market):
 
 | | |
 |---|---|
