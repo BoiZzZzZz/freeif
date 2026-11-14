@@ -5,7 +5,7 @@ import { ReceiptCard } from "@/components/receipt-card";
 const STEPS = [
   ["Pick a game and a team", "Tonight's games, each team with its chance of winning."],
   ["Say what's free", "Wings, dessert, a drink. Set how many customers, and see your one fixed cost."],
-  ["Put the code on the counter", "Customers scan after they buy. If the team wins, they are paid back automatically."],
+  ["Hand out the cards", "One card per customer. If the team wins, they scan it and get their money back."],
 ];
 
 export default function Home() {
