@@ -403,8 +403,9 @@ contract PromoVault is EIP712 {
     ///         in the quote) may call this; the merchant and the owner cannot.
     /// @dev In hedge mode the one claim is taken at creation, so this always reverts. Works while
     ///      the vault is paused: the promo locked every claim's payout when it was created, so a
-    ///      claim adds no risk, and a pause over a claim window would otherwise leave the merchant
-    ///      paying for cover no customer could take.
+    ///      claim adds no risk beyond that lock, and a pause over a claim window would otherwise
+    ///      leave the merchant paying for cover no customer could take. So a pause does not stop a
+    ///      stolen claim signer key either: the owner's answer to one is veto, then voidPromo.
     function registerClaim(uint256 promoId, address customer) external {
         Promo storage p = _promo(promoId);
         if (msg.sender != p.claimSigner) revert NotClaimSigner();
