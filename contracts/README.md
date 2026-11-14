@@ -2,13 +2,13 @@
 
 `PromoVault.sol`: the USDC vault that underwrites promos on Arc. One contract, a Foundry project.
 
-Deployed and verified on Arc testnet (chain 5042002): [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d).
+Deployed and verified on Arc testnet (chain 5042002): [`0x828295d7213DBA6eB281354d61801082006f72e6`](https://explorer.testnet.arc.io/address/0x828295d7213DBA6eB281354d61801082006f72e6), v2, since Nov 14 (block 72249296). The first vault, v1, is [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d): every promo until Nov 15 ran on it, and its pause also blocked `registerClaim`.
 
 ```
 git submodule update --init                                 # once after cloning, from the repo's root: forge-std and OpenZeppelin
 forge build
 forge test                                                  # everything, about a minute (nearly all of it the two invariant runs)
-forge test --no-match-contract PromoVaultInvariantTest      # the 248 unit and fuzz tests, about 2 seconds (it leaves out both invariant contracts)
+forge test --no-match-contract PromoVaultInvariantTest      # the 252 unit and fuzz tests, about 2 seconds (it leaves out both invariant contracts)
 ```
 
 Solidity 0.8.28, evm version cancun, optimizer 200 runs, `via_ir` off. OpenZeppelin Contracts v5.7.0 (`EIP712`, `ECDSA`, `SafeERC20`).
@@ -36,4 +36,5 @@ Solidity 0.8.28, evm version cancun, optimizer 200 runs, `via_ir` off. OpenZeppe
 | `test/Invariants.t.sol` | A handler that makes random legal calls, and five invariants checked after each one, the first being `balance >= lockedCollateral` |
 | `test/review2/Review2.t.sol` | The second review's tests (Nov 13). `test_finding_...` shows with numbers an outcome the review reported (a quote held open on a running market, fixed in the keeper); the second finding, a pause over a claim window, is fixed in v2 and its test now shows the customer registered and paid while paused; `test_note_...` shows behavior that is by design but worth knowing. The rest: covers (hedge mode) through a veto, a void, a blocklist and a pause, encoding and overflow, rounding, the constructor's zero-address checks, payout gas limits |
 | `test/review2/Review2Invariants.t.sol` | A second invariant harness, with its own model of which calls must go through and which must be refused, checked both ways on every call. One address can play every role. Three invariants, and seven fixed walks of 600 calls each |
+| `test/review3/Review3.t.sol` | The third review's tests (Nov 14, of v2): `registerClaim` paused and unpaused gives the same result and the same books from the same state (a fuzz test); what a pause no longer stops (a stolen claim signer key) and the owner's remedy (veto, then void); a quote signed before a pause works again after the unpause |
 | `test/mocks/MockUSDC.sol` | A 6-decimal token with `permit` and a blocklist |
