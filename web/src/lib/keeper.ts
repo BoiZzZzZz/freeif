@@ -283,6 +283,19 @@ export type Vault = {
 };
 
 /** The keeper's answer to a promo's cards: accepted, and registered one at a time after it. */
+/** The keeper's `GET /health`: which vault and keys it runs with, and what the Stream has delivered. */
+export type Health = {
+  ok: boolean;
+  chainId: number;
+  vault: string;
+  pricer: string;
+  oracle: string;
+  relayer: string;
+  block: number;
+  commit: string | null;
+  stream: { deliveries: number; lastDeliveryAt: number | null; events: number; byStream: number };
+};
+
 export type CardsAccepted = {
   promoId: string;
   cards: number;
@@ -372,6 +385,9 @@ export const keeper = {
    */
   sendCards: (promoId: string, cards: string[], userToken: string) =>
     call<CardsAccepted>(`/promos/${encodeURIComponent(promoId)}/cards`, { cards, userToken }),
+
+  /** Which vault the keeper runs with, and the Stream's deliveries: the mechanics view's footer. */
+  health: (signal?: AbortSignal) => call<Health>("/health", undefined, signal),
 
   /** The vault's books, every promo, and the newest events: the page for liquidity providers. */
   vault: (signal?: AbortSignal) => call<Vault>("/vault", undefined, signal),
