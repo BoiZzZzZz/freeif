@@ -245,7 +245,7 @@ export class Relayer {
       // The checks above can be overtaken between the read and the transaction.
       const name = revertName(err);
       if (name === "PromoFull") throw new ClaimRefusal("full", "This promotion is full.");
-      if (name === "ClaimsClosed" || name === "WrongStatus" || name === "VaultPaused") {
+      if (name === "ClaimsClosed" || name === "WrongStatus") {
         throw new ClaimRefusal("closed", "This promotion is no longer taking customers.");
       }
       console.error(`[relayer] registerClaim(${id}, ${customer}) failed in status ${statusName(promo.status)}:`, err);
