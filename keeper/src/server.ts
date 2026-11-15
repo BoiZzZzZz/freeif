@@ -11,6 +11,7 @@ import { streamSSE } from "hono/streaming";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { createPublicClient, erc20Abi, getAddress, http, isAddress, zeroAddress, type Address } from "viem";
 import { promoVaultAbi } from "./abi.ts";
+import { BACKUP_VERSION, BackupError, MAX_BACKUP_BYTES, applyInto, describeAdded, mergeData, readBackup, type Backup } from "./backup.ts";
 import { CHAIN_ID, rpcUrls } from "./config.ts";
 import { Status, arcTestnet, statusName, type PublicClient } from "./chain.ts";
 import { LEAGUES, WEATHER, type Games } from "./games.ts";
@@ -51,6 +52,10 @@ type Deps = {
   streamSecret?: string;
   /** Starter test dollars for a new merchant's account (`STARTER_AMOUNT`). Undefined turns them off. */
   starter?: Starter;
+  /** The key `GET /backup` and `POST /restore` ask for (`BACKUP_KEY`). Undefined: both answer 404 `off`. */
+  backupKey?: string;
+  /** The plain settings a backup names, for `pnpm rehost` (config.plainSettings()). */
+  settings?: Record<string, string>;
   /** How much one client may ask (limit.ts). Tests pass smaller numbers. */
   limits?: Limits;
   /** The clock the limits, the shared promo reads and a card's deadline are counted on (tests). */
@@ -83,6 +88,9 @@ function clientOf(c: Context): string {
     return "unknown";
   }
 }
+
+/** The commit this build was made from, when the host says (Railway does). Null on a laptop. */
+const commit = (): string | null => process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? null;
 
 function tooMany(c: Context, seconds: number): Response {
   c.header("Retry-After", String(seconds));
@@ -235,6 +243,8 @@ export function makeApp(d: Deps): Hono {
       : path === "/price" ? limits.price
       : path === "/intervals" ? limits.intervals
       : path === "/health/rpc" ? limits.rpc
+      : path === "/backup" ? limits.backup
+      : path === "/restore" && post ? limits.restore
       : null;
     const who = clientOf(c);
     const wait = limiter.take(limits.all, who) || (own === null ? 0 : limiter.take(own, who));
@@ -273,7 +283,7 @@ export function makeApp(d: Deps): Hono {
       relayer: d.relayer.address,
       block: Number(block),
       // The commit this build was made from, when the host says (Railway does). Null on a laptop.
-      commit: process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) ?? null,
+      commit: commit(),
       // Promos from this id on (covers excepted) are covered by claim cards. Null: none are.
       cardsFromPromo: d.cardsFrom === undefined ? null : Number(d.cardsFrom),
       // The feed: what the QuickNode Stream has delivered, and how far the keeper's own read has come.
@@ -654,6 +664,72 @@ export function makeApp(d: Deps): Hono {
     }
     return c.json(await vaultRead.value);
   });
+
+  // A copy of the keeper's file, for a laptop to keep (`pnpm backup`), and the way back in for a keeper
+  // that lost its file. Both need the header `X-Backup-Key`; a keeper with no `BACKUP_KEY` has neither.
+  function backupRefusal(c: Context): Response | null {
+    if (d.backupKey === undefined) return c.json({ error: { code: "off", message: "Backups are not turned on for this keeper." } }, 404);
+    if (!sameSecret(c.req.header("x-backup-key"), d.backupKey)) {
+      return c.json({ error: { code: "unauthorized", message: "This needs the backup key." } }, 401);
+    }
+    return null;
+  }
+
+  // The whole file, with what it is: the vault, when, the build, and the plain settings the keeper runs
+  // with. The file holds no key and no login token: logins are kept as hashes.
+  app.get("/backup", (c) => {
+    const refused = backupRefusal(c);
+    if (refused) return refused;
+    const backup: Backup = {
+      meta: { version: BACKUP_VERSION, vault: d.vault, at: Math.floor(clock() / 1000), commit: commit(), settings: d.settings ?? {} },
+      data: d.store.data,
+    };
+    return c.json(backup);
+  });
+
+  // Merges a backup into the file. What the keeper already has wins, so nothing is ever taken away and a
+  // second restore of the same backup changes nothing. Answers with what was added, section by section.
+  app.post(
+    "/restore",
+    async (c, next) => backupRefusal(c) ?? next(),
+    bodyLimit({
+      maxSize: MAX_BACKUP_BYTES,
+      onError: (c) => c.json({ error: { code: "too-large", message: `A backup may be at most ${MAX_BACKUP_BYTES / 1024 / 1024} MB.` } }, 413),
+    }),
+    async (c) => {
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        throw new BadRequest("the body is not JSON");
+      }
+      let backup: Backup;
+      try {
+        backup = readBackup(body);
+      } catch (err) {
+        if (err instanceof BackupError) throw new BadRequest(`this is not a backup: ${err.message}`);
+        throw err;
+      }
+      if (backup.meta.vault.toLowerCase() !== d.vault.toLowerCase()) {
+        return c.json(
+          { error: { code: "other-vault", message: `This backup is of vault ${backup.meta.vault}, and this keeper runs on ${d.vault}.` } },
+          409,
+        );
+      }
+
+      // From here to the save there is no await: nothing else writes the file in between.
+      const { data, added } = mergeData(d.store.data, backup.data, Math.floor(clock() / 1000));
+      applyInto(d.store.data, data);
+      // What is held in memory from the file is read again: the feed's ids (or the next read of the chain
+      // would add a restored event twice), and the promo and vault reads shared between requests.
+      d.feed.reload();
+      reads.clear();
+      vaultRead = null;
+      d.store.save();
+      console.log(`[backup] restored a backup made at ${backup.meta.at} by ${backup.meta.commit ?? "a keeper with no commit"}: ${describeAdded(added)}`);
+      return c.json({ ok: true, from: { at: backup.meta.at, commit: backup.meta.commit }, added });
+    },
+  );
 
   // One promo's events as they happen, as server-sent events. A page that shows a promo keeps this open
   // and reads the promo again on every event.

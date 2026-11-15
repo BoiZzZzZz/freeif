@@ -97,6 +97,25 @@ export function starterSettings(): { amount: bigint; budget: bigint; floor: bigi
 }
 
 /**
+ * The key `GET /backup` and `POST /restore` ask for in the header `X-Backup-Key`: a copy of the keeper's
+ * file, pulled to a laptop on a timer and pushed back into a keeper that lost it. Unset, both answer 404.
+ */
+export const backupKey = (): string | undefined => optional("BACKUP_KEY");
+
+/** The settings a backup carries for `pnpm rehost`: plain values, never a secret. */
+export const PLAIN_SETTINGS = ["CARDS_FROM_PROMO", "STARTER_AMOUNT", "STARTER_BUDGET", "STARTER_FLOOR", "EVENT_HINTS"] as const;
+
+/** Those of the plain settings the environment has, as the strings it has them. */
+export function plainSettings(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of PLAIN_SETTINGS) {
+    const value = optional(name);
+    if (value !== undefined) out[name] = value;
+  }
+  return out;
+}
+
+/**
  * The secret the QuickNode Stream sends with every delivery, in the header `x-stream-secret`. Unset,
  * `POST /stream` refuses everything and the feed is filled from the chain alone.
  */

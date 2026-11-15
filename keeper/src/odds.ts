@@ -21,7 +21,7 @@ export type OpenPromo = { promoId: string; instrumentSymbol: Hex };
 /** A reading that is the same as the last one kept is kept anyway once that one is this old. */
 const KEEP_EVERY_SECONDS = 300;
 /** The most readings kept for one promo. Past it, the older half loses every second one. */
-const MAX_POINTS = 4_000;
+export const MAX_POINTS = 4_000;
 const MAX_PENDING = 2_000;
 const PENDING_SECONDS = 86_400;
 

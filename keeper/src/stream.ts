@@ -192,7 +192,8 @@ export function decodeLog(log: RawLog, vault: Address, via: Via, seenAt: number)
   }
 }
 
-const byPosition = (a: FeedEvent, b: FeedEvent): number => a.block - b.block || a.logIndex - b.logIndex;
+/** Chain order: by block, then by place in the block. */
+export const byPosition = (a: FeedEvent, b: FeedEvent): number => a.block - b.block || a.logIndex - b.logIndex;
 
 type Deps = {
   store: Store;
@@ -213,7 +214,8 @@ const CHUNK_BLOCKS = 9_000;
 /** A pause between two queries of a long catch-up: the public RPC limits requests per second. */
 const CHUNK_PAUSE_MS = 350;
 const CURSOR_SAVE_MS = 60_000;
-const MAX_EVENTS = 5_000;
+/** The most events the feed keeps: the oldest go first. */
+export const MAX_EVENTS = 5_000;
 
 export class Feed {
   readonly #d: Deps;
@@ -224,7 +226,17 @@ export class Feed {
 
   constructor(deps: Deps) {
     this.#d = deps;
-    for (const event of deps.store.data.feed.events) this.#ids.add(event.id);
+    this.reload();
+  }
+
+  /**
+   * Reads again which events the store holds. The feed keeps their ids in memory so that an event is
+   * added once, whichever way it comes; after the store's events are replaced (a restore from a backup)
+   * those ids must be the store's again, or the next read of the chain would add a restored event twice.
+   */
+  reload(): void {
+    this.#ids.clear();
+    for (const event of this.#d.store.data.feed.events) this.#ids.add(event.id);
   }
 
   #now(): number {

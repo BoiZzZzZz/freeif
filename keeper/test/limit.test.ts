@@ -147,6 +147,20 @@ test("quote_hasItsOwnSmallerLimit_whichLeavesTheOtherRoutesOpen", async () => {
   assert.equal((await get("/promos/1/odds")).status, 200);
 });
 
+test("backupAndRestore_eachHaveTheirOwnSmallLimit", async () => {
+  const { app, get } = makeHttp({
+    backup: { name: "backup", max: 2, windowMs: 60_000 },
+    restore: { name: "restore", max: 2, windowMs: 60_000 },
+  });
+  const restore = () => app.request("/restore", { method: "POST", headers: { "x-real-ip": "203.0.113.7" }, body: "{}" });
+  // This keeper has no backup key: the two that are let through reach the route, which says it is off.
+  assert.deepEqual([(await get("/backup")).status, (await get("/backup")).status, (await get("/backup")).status], [404, 404, 429]);
+  assert.deepEqual([(await restore()).status, (await restore()).status, (await restore()).status], [404, 404, 429]);
+  assert.equal(LIMITS.backup.max, 6);
+  assert.equal(LIMITS.restore.max, 6);
+  assert.equal((await get("/feed")).status, 200);
+});
+
 test("eventStreams_areCountedWhileOpen_andAClosedOneGivesItsPlaceBack", async () => {
   const { get } = makeHttp({ streams: { perClient: 2, inAll: 3 } });
   const first = await get("/promos/1/events");

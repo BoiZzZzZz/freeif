@@ -110,6 +110,10 @@ export type Limits = {
   intervals: Rule;
   /** `GET /health/rpc`: a call to every RPC endpoint. */
   rpc: Rule;
+  /** `GET /backup`: the whole of the keeper's file, a few megabytes. */
+  backup: Rule;
+  /** `POST /restore`: a backup of a few megabytes read and merged into the file. */
+  restore: Rule;
   /** Event streams open at once: per client, and in all. */
   streams: { perClient: number; inAll: number };
 };
@@ -123,5 +127,7 @@ export const LIMITS: Limits = {
   starter: { name: "starter", max: 5, windowMs: MINUTE },
   intervals: { name: "intervals", max: 20, windowMs: MINUTE },
   rpc: { name: "rpc", max: 6, windowMs: MINUTE },
+  backup: { name: "backup", max: 6, windowMs: MINUTE },
+  restore: { name: "restore", max: 6, windowMs: MINUTE },
   streams: { perClient: 60, inAll: 1_000 },
 };

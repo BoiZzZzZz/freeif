@@ -243,6 +243,20 @@ test("subscribe_getsEachNewEventOnce_untilItStops", () => {
   assert.equal(seen.length, 1);
 });
 
+test("reload_afterTheStoresEventsAreReplaced_countsThemAsSeen", () => {
+  const { store, feed } = makeFeed();
+  const other = makeFeed();
+  other.feed.deliver(delivery(paidBlock));
+  // A restore writes events into the store behind the feed's back; the feed reads them again.
+  store.data.feed.events.push(...other.store.data.feed.events);
+  feed.reload();
+  assert.deepEqual(feed.deliver(delivery(paidBlock)), { logs: 3, added: 0 });
+  // And an event that left the store can be added again.
+  store.data.feed.events.length = 0;
+  feed.reload();
+  assert.deepEqual(feed.deliver(delivery(paidBlock)), { logs: 3, added: 3 });
+});
+
 test("add_promoCreated_tiesTheLabelKeptUnderItsQuotesNonce", () => {
   const { store, feed } = makeFeed();
   const created = decodeLog(readDelivery([one("PromoCreated")])[0]!, VAULT, "stream", 1)!;

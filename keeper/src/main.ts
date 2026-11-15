@@ -87,6 +87,8 @@ const cardsFrom = config.cardsFromPromo();
 console.log(cardsFrom === undefined ? "[cards] CARDS_FROM_PROMO is not set: no promo uses cards" : `[cards] promos from ${cardsFrom} on use cards`);
 const streamSecret = config.streamSecret();
 if (streamSecret === undefined) console.log("[feed] QUICKNODE_STREAM_SECRET is not set: POST /stream refuses every delivery");
+const backupKey = config.backupKey();
+if (backupKey === undefined) console.log("[backup] BACKUP_KEY is not set: GET /backup and POST /restore are off");
 
 const app = makeApp({
   client,
@@ -104,6 +106,8 @@ const app = makeApp({
   cardsFrom,
   streamSecret,
   starter,
+  backupKey,
+  settings: config.plainSettings(),
 });
 const server = serve({ fetch: app.fetch, port: config.port(), hostname: "0.0.0.0" }, (info) => {
   console.log(`[server] listening on ${info.port}; vault ${vault}; RPCs: ${config.rpcUrls().length}`);
