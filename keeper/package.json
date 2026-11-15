@@ -19,6 +19,7 @@
     "stream": "node scripts/stream.ts",
     "ship": "node scripts/deploy.mjs",
     "rehost": "node scripts/rehost.mjs",
+    "backup": "node scripts/backup.mjs",
     "topup": "node scripts/topup.ts"
   },
   "dependencies": {

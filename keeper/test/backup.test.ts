@@ -1,12 +1,16 @@
 // The backup and the restore: the store's vault stamp in a temporary directory, the merge section by
 // section (what is added, where the live file wins, that a second restore changes nothing), the two
-// routes through the HTTP app, and a restored event that the feed's next read of the chain does not add
-// again.
+// routes through the HTTP app, a restored event that the feed's next read of the chain does not add again,
+// and `pnpm backup` itself against a keeper on a local port.
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { serve } from "@hono/node-server";
 import type { Address, Hex } from "viem";
 import "../src/config.ts";
 import { MAX_BACKUP_BYTES, applyInto, mergeData, readBackup, BackupError, type Backup } from "../src/backup.ts";
@@ -632,4 +636,140 @@ test("aRestoredEvent_isNotAddedASecondTime_byTheFeedsNextReadOfTheChain", async 
   applyInto(bare.data, mergeData(bare.data, oldStore.data, NOW).data);
   assert.equal(await bareFeed.catchUp(), 12);
   assert.equal(bare.data.feed.events.length, 24);
+});
+
+// ---- pnpm backup ----
+
+const run = promisify(execFile);
+const SCRIPT = new URL("../scripts/backup.mjs", import.meta.url);
+
+/** `pnpm backup` with these arguments, against `url`, with nothing read from secrets.env. */
+async function backupScript(url: string, dir: string, args: string[] = [], timeout = 20_000): Promise<{ out: string; code: number }> {
+  const env: Record<string, string> = { KEEPER_URL: url, BACKUP_KEY: KEY, FREEIF_BACKUP_DIR: dir, FREEIF_SECRETS: join(dir, "no-secrets.env") };
+  for (const name of ["PATH", "Path", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "HOME", "USERPROFILE"]) {
+    const value = process.env[name];
+    if (value !== undefined) env[name] = value;
+  }
+  try {
+    const { stdout, stderr } = await run(process.execPath, [fileURLToPath(SCRIPT), ...args], { env, timeout });
+    return { out: stdout + stderr, code: 0 };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; code?: number };
+    return { out: `${e.stdout ?? ""}${e.stderr ?? ""}`, code: typeof e.code === "number" ? e.code : 1 };
+  }
+}
+
+/** A keeper on a local port. */
+async function listen(app: { fetch: (req: Request) => Response | Promise<Response> }) {
+  let server: ReturnType<typeof serve> | undefined;
+  const port = await new Promise<number>((resolve) => {
+    server = serve({ fetch: app.fetch, port: 0, hostname: "127.0.0.1" }, (info) => resolve(info.port));
+  });
+  return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>((resolve) => server!.close(() => resolve())) };
+}
+
+const files = (dir: string, prefix: string) => readdirSync(dir).filter((f) => f.startsWith(prefix)).sort();
+
+test("pnpm_backup_pulls_keepsTheLatest_saysUnchanged_holdsTheLatestAgainstAnEmptyKeeper_andRestores", async () => {
+  const dir = tempDir();
+  const store = new Store(null, VAULT);
+  Object.assign(store.data, fullBackup(), { vault: VAULT });
+  const live = keeper({ backupKey: KEY, store, limits: { backup: { name: "backup", max: 100, windowMs: 60_000 } } });
+  const { url, close } = await listen(live.app);
+  try {
+    const prefix = "keeper-68a00243-";
+    const latest = join(dir, `latest-${VAULT.toLowerCase()}.json`);
+
+    // A first pull: one file, and the latest.
+    let r = await backupScript(url, dir);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /vault 0x68a0…e06d: 2 promos with labels, 11 odds readings, 2 feed events, [\d.]+ KB, keeper-68a00243-.*\.json/);
+    assert.equal(files(dir, prefix).length, 1);
+    assert.deepEqual((JSON.parse(readFileSync(latest, "utf8")) as Backup).data.promoLabels, fullBackup().promoLabels);
+
+    // Nothing changed but the feed's cursor: no new file.
+    store.data.feed.cursor = 999;
+    r = await backupScript(url, dir);
+    assert.match(r.out, /unchanged since keeper-68a00243-/);
+    assert.equal(files(dir, prefix).length, 1);
+
+    // The keeper loses its file: the pull is kept, the latest is not replaced.
+    Object.assign(store.data, empty(), { vault: VAULT });
+    r = await backupScript(url, dir);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /WARNING: this backup holds less than latest-.*0 promo labels against 2, 0 odds readings against 11/);
+    assert.equal(files(dir, prefix).length, 2);
+    assert.deepEqual((JSON.parse(readFileSync(latest, "utf8")) as Backup).data.promoLabels, fullBackup().promoLabels);
+
+    // Put back from the latest, the vault named by the keeper's /health.
+    r = await backupScript(url, dir, ["--restore"]);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /restored latest-0x68a0.*\.json into http.*: added .*2 promoLabels.*11 odds/);
+    assert.deepEqual(store.data.promoLabels, fullBackup().promoLabels);
+    r = await backupScript(url, dir, ["--restore"]);
+    assert.match(r.out, /nothing was new/);
+
+    // --force makes an emptier backup the latest anyway.
+    Object.assign(store.data, empty(), { vault: VAULT });
+    r = await backupScript(url, dir, ["--force"]);
+    assert.doesNotMatch(r.out, /WARNING/);
+    assert.deepEqual((JSON.parse(readFileSync(latest, "utf8")) as Backup).data.promoLabels, {});
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pnpm_backup_keepsTheNewest300PullsOfTheVault_andNoOtherFileIsTouched", async () => {
+  const dir = tempDir();
+  const store = new Store(null, VAULT);
+  store.data.promoLabels["1"] = label("Wings");
+  const { url, close } = await listen(keeper({ backupKey: KEY, store }).app);
+  try {
+    mkdirSync(dir, { recursive: true });
+    // 305 older pulls of this vault, and one of another vault.
+    const older = (i: number) => `keeper-68a00243-2000-01-01T${String(i).padStart(6, "0")}.000Z.json`;
+    for (let i = 0; i < 305; i++) writeFileSync(join(dir, older(i)), "{}");
+    writeFileSync(join(dir, "keeper-828295d7-2000-01-01T000000.000Z.json"), "{}");
+    const r = await backupScript(url, dir);
+    assert.equal(r.code, 0, r.out);
+    const kept = files(dir, "keeper-68a00243-");
+    assert.equal(kept.length, 300);
+    assert.ok(!kept.at(-1)!.startsWith("keeper-68a00243-2000"), "the new pull is the newest");
+    assert.ok(!existsSync(join(dir, older(5))), "the oldest are gone");
+    assert.ok(existsSync(join(dir, older(6))));
+    assert.ok(existsSync(join(dir, "keeper-828295d7-2000-01-01T000000.000Z.json")), "another vault's pulls are its own");
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pnpm_backup_withTheWrongKey_saysSo_andWritesNothing", async () => {
+  const dir = tempDir();
+  const { url, close } = await listen(keeper({ backupKey: "another-key" }).app);
+  try {
+    const r = await backupScript(url, dir);
+    assert.equal(r.code, 1);
+    assert.match(r.out, /401: this BACKUP_KEY is not the keeper's/);
+    assert.ok(!existsSync(dir) || files(dir, "keeper-").length === 0);
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("pnpm_backup_watch_whenRailwayHasNoKeeper_saysLoudlyHowToBringItBack", async () => {
+  const dir = tempDir();
+  // What Railway answers for a project it removed.
+  const gone = { fetch: () => new Response("Application not found", { status: 404, headers: { "x-railway-fallback": "true" } }) };
+  const { url, close } = await listen(gone);
+  try {
+    const r = await backupScript(url, dir, ["--watch", "1"], 1_500);
+    assert.match(r.out, /THE KEEPER IS GONE/);
+    assert.match(r.out, /pnpm rehost +then +pnpm ship +then +pnpm backup --restore/);
+  } finally {
+    await close();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
