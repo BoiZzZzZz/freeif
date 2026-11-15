@@ -59,7 +59,11 @@ const MAX_TOKEN = 4096;
 const STOPS_CARDS = new Set<ClaimRefusalCode>(["closed", "full", "unknown-promo", "not-our-promo"]);
 
 /** The name a claim is counted under in the keeper's file: a hash, so the file holds no user ids. */
-const claimKey = (who: string): string => createHash("sha256").update(who).digest("hex");
+export const claimKey = (who: string): string => createHash("sha256").update(who).digest("hex");
+
+/** False for a Circle user token that cannot be one (empty, far too long, or with a space in it): Circle is not asked. */
+export const plausibleToken = (userToken: string): boolean =>
+  userToken !== "" && userToken.length <= MAX_TOKEN && !/\s/.test(userToken);
 
 /** The name of the custom error a contract call reverted with, or null. */
 export function revertName(err: unknown): string | null {
@@ -99,9 +103,7 @@ export class Relayer {
 
   /** Whose login `userToken` is, by Circle. A token that cannot be one is refused before Circle is asked. */
   async #identify(userToken: string) {
-    if (userToken === "" || userToken.length > MAX_TOKEN || /\s/.test(userToken)) {
-      throw new ClaimRefusal("login", "Please log in again.");
-    }
+    if (!plausibleToken(userToken)) throw new ClaimRefusal("login", "Please log in again.");
     let user;
     try {
       user = await this.#d.identify(userToken);
@@ -178,17 +180,26 @@ export class Relayer {
   }
 
   /**
+   * Runs `task` with the relayer's wallet once everything already in the line is done, and holds the line
+   * until it ends. Every transaction the relayer's key sends goes through here (claims, cards, starter
+   * test dollars), so two never race for a nonce.
+   */
+  inLine<T>(task: (wallet: WalletClient) => Promise<T>): Promise<T> {
+    const run = this.#queue.then(() => task(this.#d.wallet));
+    this.#queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /**
    * One at a time, so two claims never race for a nonce or for the same user's one claim. `key` is who is
    * claiming; null for a card, which is counted against nobody.
    */
   #enqueue(promoId: bigint, customer: Address, key: string | null): Promise<ClaimResult> {
-    const run = this.#queue.then(() => {
+    return this.inLine(async () => {
       const stopped = key === null ? this.#stopped.get(promoId.toString()) : undefined;
       if (stopped !== undefined) throw stopped;
       return this.#register(promoId, customer, key);
     });
-    this.#queue = run.catch(() => undefined);
-    return run;
   }
 
   async #register(promoId: bigint, customer: Address, key: string | null): Promise<ClaimResult> {

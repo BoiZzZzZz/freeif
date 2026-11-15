@@ -76,6 +76,26 @@ export function cardsFromPromo(): bigint | undefined {
   return BigInt(raw);
 }
 
+/** A setting in dollars ("5", "2.50") as USDC base units (6 decimals). */
+function dollars(name: string, fallback: string): bigint {
+  const raw = optional(name) ?? fallback;
+  const match = /^(\d{1,9})(?:\.(\d{1,6}))?$/.exec(raw);
+  if (!match) throw new Error(`${name} must be dollars, like 5 or 2.50, got "${raw}"`);
+  return BigInt(match[1]!) * 1_000_000n + BigInt((match[2] ?? "").padEnd(6, "0"));
+}
+
+/**
+ * Starter test dollars: a new merchant's account holds nothing and cannot try Pay, so the keeper sends it
+ * `amount` once per Circle login, from the relayer's wallet. At most `budget` in all, and never so much
+ * that the relayer would keep less than `floor` (it pays every claim's network fee). Null when
+ * `STARTER_AMOUNT` is unset or 0: the feature is off.
+ */
+export function starterSettings(): { amount: bigint; budget: bigint; floor: bigint } | null {
+  const amount = dollars("STARTER_AMOUNT", "0");
+  if (amount === 0n) return null;
+  return { amount, budget: dollars("STARTER_BUDGET", "50"), floor: dollars("STARTER_FLOOR", "25") };
+}
+
 /**
  * The secret the QuickNode Stream sends with every delivery, in the header `x-stream-secret`. Unset,
  * `POST /stream` refuses everything and the feed is filled from the chain alone.

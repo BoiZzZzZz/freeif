@@ -1,8 +1,8 @@
 // What the keeper remembers between restarts, in one JSON file. The chain is the source of truth for
 // promos and money; this file only holds what the chain does not: the plain strings behind the hashes
 // in a promo, the quotes that are still usable, which logins have claimed, what each promo gives away and
-// for which shop, the keeper's own tx hashes, the vault's events as the pages' feed, and how each promo's
-// chance has moved.
+// for which shop, the keeper's own tx hashes, the vault's events as the pages' feed, how each promo's
+// chance has moved, and which logins have had their starter test dollars.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Address, Hex } from "viem";
@@ -31,6 +31,12 @@ export type InstrumentRecord = {
 };
 export type LiveQuote = { maxPayout: string; premium: string; expiry: number };
 export type TxRecord = { at: number; promoId: string; action: string; hash: Hex };
+/**
+ * Starter test dollars sent to one Circle login (starter.ts). `txHash` is null while the grant is held
+ * and not sent yet; a record left like that by a restart counts as given, because whether its transfer
+ * went out is not known.
+ */
+export type StarterGrant = { address: Address; amount: string; at: number; txHash: Hex | null };
 
 type Data = {
   /** keccak256(event id string) => the event. A promo stores only the hash. */
@@ -56,6 +62,11 @@ type Data = {
   pendingOdds: Record<Hex, OddsPoint>;
   /** promo id => its hedge: an order on Gemini's sandbox exchange, or the order the keeper would place (hedge.ts). */
   hedges: Record<string, Hedge>;
+  /**
+   * Starter test dollars: who => what they were sent. "Who" is the SHA-256 of `circle:<Circle user id>`,
+   * as for claims, so the file holds no user ids. One grant per login, for good.
+   */
+  starter: Record<string, StarterGrant>;
   /** The most recent transactions the keeper and the relayer sent. */
   txs: TxRecord[];
   /** The vault's events, from the QuickNode Stream and from the keeper's own read of the chain (stream.ts). */
@@ -82,6 +93,7 @@ const empty = (): Data => ({
   oddsStart: {},
   pendingOdds: {},
   hedges: {},
+  starter: {},
   txs: [],
   feed: { events: [], cursor: null, deliveries: 0, lastDeliveryAt: null },
 });

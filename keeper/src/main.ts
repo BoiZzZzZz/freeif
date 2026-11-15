@@ -1,5 +1,7 @@
-// One process: the pricing API, the claim relayer, the settlement loop and the Stream's webhook.
+// One process: the pricing API, the claim relayer (and the starter test dollars it sends), the settlement
+// loop and the Stream's webhook.
 import { serve } from "@hono/node-server";
+import { formatUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { promoVaultAbi } from "./abi.ts";
 import { makePublicClient, makeWalletClient } from "./chain.ts";
@@ -12,6 +14,7 @@ import { Odds } from "./odds.ts";
 import { Pricer } from "./pricer.ts";
 import { Relayer } from "./relayer.ts";
 import { makeApp } from "./server.ts";
+import { Starter } from "./starter.ts";
 import { Store } from "./store.ts";
 import { Feed } from "./stream.ts";
 
@@ -38,7 +41,16 @@ if (!same(vaultPricer, pricerAccount.address)) throw new Error(`PRICER_PK is ${p
 if (!same(vaultOracle, oracleWallet.account.address)) throw new Error(`ORACLE_PK is ${oracleWallet.account.address}, the vault's oracle is ${vaultOracle}`);
 if (!same(vaultUsdc, usdc)) throw new Error(`USDC_ADDRESS is ${usdc}, the vault's token is ${vaultUsdc}`);
 
-const relayer = new Relayer({ client, wallet: relayerWallet, vault, store, identify: makeIdentify(config.circleApiKey()) });
+const identify = makeIdentify(config.circleApiKey());
+const relayer = new Relayer({ client, wallet: relayerWallet, vault, store, identify });
+// Starter test dollars for a new merchant's account, from the relayer's wallet, once per login.
+const starterSettings = config.starterSettings();
+const starter = starterSettings === null ? undefined : new Starter({ client, relayer, usdc, store, identify, settings: starterSettings });
+console.log(
+  starterSettings === null
+    ? "[starter] STARTER_AMOUNT is not set: no starter test dollars are given"
+    : `[starter] ${formatUnits(starterSettings.amount, 6)} per login, ${formatUnits(starterSettings.budget, 6)} in all, the relayer keeps ${formatUnits(starterSettings.floor, 6)}`,
+);
 const pricer = new Pricer({
   client,
   vault,
@@ -90,6 +102,7 @@ const app = makeApp({
   testKey: config.claimTestKey(),
   cardsFrom,
   streamSecret,
+  starter,
 });
 const server = serve({ fetch: app.fetch, port: config.port(), hostname: "0.0.0.0" }, (info) => {
   console.log(`[server] listening on ${info.port}; vault ${vault}; RPCs: ${config.rpcUrls().length}`);

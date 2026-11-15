@@ -1,5 +1,6 @@
 // The keeper's HTTP API: prices and signed quotes for the merchant form, claims for the customer page,
-// the QuickNode Stream's webhook, and the vault's events for the pages that show a promo.
+// starter test dollars for a new merchant's account, the QuickNode Stream's webhook, and the vault's
+// events for the pages that show a promo.
 // Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seconds.
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { gunzipSync } from "node:zlib";
@@ -20,6 +21,7 @@ import { Gate, LIMITS, Limiter, type Limits } from "./limit.ts";
 import { Pricer, Refusal, type PriceRequest } from "./pricer.ts";
 import { ClaimRefusal, Relayer } from "./relayer.ts";
 import { sleep } from "./sleep.ts";
+import { StarterRefusal, type Starter } from "./starter.ts";
 import type { Store } from "./store.ts";
 import type { Feed, FeedEvent } from "./stream.ts";
 
@@ -47,6 +49,8 @@ type Deps = {
   cardsFrom?: bigint;
   /** The secret the QuickNode Stream sends with each delivery. Undefined refuses every delivery. */
   streamSecret?: string;
+  /** Starter test dollars for a new merchant's account (`STARTER_AMOUNT`). Undefined turns them off. */
+  starter?: Starter;
   /** How much one client may ask (limit.ts). Tests pass smaller numbers. */
   limits?: Limits;
   /** The clock the limits, the shared promo reads and a card's deadline are counted on (tests). */
@@ -140,6 +144,16 @@ const CLAIM_STATUS: Partial<Record<ClaimRefusal["code"], 400 | 401 | 403 | 409 |
   failed: 502,
 };
 
+const STARTER_STATUS: Record<StarterRefusal["code"], 401 | 403 | 404 | 409 | 502> = {
+  off: 404,
+  login: 401,
+  "not-your-wallet": 403,
+  already: 409,
+  funded: 409,
+  "none-left": 409,
+  failed: 502,
+};
+
 /** Card addresses one request may carry. A page with more sends them in parts. */
 export const MAX_CARDS_PER_REQUEST = 500;
 
@@ -217,6 +231,7 @@ export function makeApp(d: Deps): Hono {
       path === "/quote" && post ? limits.quote
       : path === "/claims" && post ? limits.claims
       : post && /^\/promos\/\d+\/cards$/.test(path) ? limits.cards
+      : path === "/starter" && post ? limits.starter
       : path === "/price" ? limits.price
       : path === "/intervals" ? limits.intervals
       : path === "/health/rpc" ? limits.rpc
@@ -236,6 +251,9 @@ export function makeApp(d: Deps): Hono {
     }
     if (err instanceof ClaimRefusal) {
       return c.json({ error: { code: err.code, message: err.message } }, CLAIM_STATUS[err.code] ?? 422);
+    }
+    if (err instanceof StarterRefusal) {
+      return c.json({ error: { code: err.code, message: err.message } }, STARTER_STATUS[err.code]);
     }
     if (err instanceof BadRequest || err instanceof SyntaxError) {
       return c.json({ error: { code: "bad-request", message: err.message } }, 400);
@@ -260,6 +278,8 @@ export function makeApp(d: Deps): Hono {
       cardsFromPromo: d.cardsFrom === undefined ? null : Number(d.cardsFrom),
       // The feed: what the QuickNode Stream has delivered, and how far the keeper's own read has come.
       stream: { ...d.feed.status(), webhook: d.streamSecret !== undefined },
+      // Starter test dollars: what one login gets and how many more can be given now. Null: none are given.
+      starter: d.starter === undefined ? null : await d.starter.status(),
     });
   });
 
@@ -429,6 +449,19 @@ export function makeApp(d: Deps): Hono {
 
     if (typeof body.userToken !== "string" || body.userToken === "") throw new BadRequest("userToken is required");
     return c.json(await d.relayer.registerClaim(promoId, body.customer, body.userToken));
+  });
+
+  // Starter test dollars: a new merchant's account holds nothing, so the keeper sends it the starter
+  // amount, once per Circle login. `userToken` is the merchant's login: whose it is is asked of Circle,
+  // and `address` must be one of that login's wallets, as for a claim.
+  app.post("/starter", bodyLimit({ maxSize: 16 * 1024 }), async (c) => {
+    if (d.starter === undefined) throw new StarterRefusal("off", "Test dollars aren't available right now.");
+    const body = (await c.req.json()) as unknown;
+    if (typeof body !== "object" || body === null) throw new BadRequest("the body must be an object");
+    const { address, userToken } = body as Record<string, unknown>;
+    if (typeof address !== "string" || !isAddress(address)) throw new BadRequest("address must be an address");
+    if (typeof userToken !== "string" || userToken === "") throw new BadRequest("userToken is required");
+    return c.json(await d.starter.grant(getAddress(address), userToken));
   });
 
   // Claim cards: the merchant's browser made one small wallet per card and sends their addresses here,
