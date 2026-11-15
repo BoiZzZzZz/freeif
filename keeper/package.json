@@ -18,6 +18,7 @@
     "e2e": "node scripts/e2e.ts",
     "stream": "node scripts/stream.ts",
     "ship": "node scripts/deploy.mjs",
+    "rehost": "node scripts/rehost.mjs",
     "topup": "node scripts/topup.ts"
   },
   "dependencies": {

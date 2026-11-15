@@ -196,6 +196,15 @@ The keeper runs on Railway at `https://freeif-production.up.railway.app`, built 
 
 To deploy: push to `main`, then `pnpm ship`. It asks Railway to build the pushed commit and waits until the new build passes its health check (about a minute); if the build fails, the previous one keeps serving. It needs `RAILWAY_API_TOKEN`, `RAILWAY_SERVICE_ID` and `RAILWAY_ENVIRONMENT_ID`.
 
+### When the keeper's file is lost
+
+On Nov 15 2026 Railway's own system removed the project 48 hours after it was made, with the volume (the workspace was on the trial plan; Railway's audit log names the actor as "system" and its documentation gives no rule for it). The keeper was away for about 14 hours and came back at the same address.
+
+- `pnpm rehost [NAME=value ...]` makes the project again: service, variables (secrets by name from `secrets.env`, plain settings as arguments), volume, settings, the public domain and the source repo. Then `pnpm ship`. It needs `RAILWAY_WORKSPACE_ID`.
+- Money is not in the file. The vault holds every promo, claim and lock, and a result can be posted at any time after the claims close, so the promos that closed while the keeper was away were settled when it came back.
+- What a new keeper has to find again: each open promo's Gemini event. It looks through the 500 events Gemini settled most recently; for an older one, name its ticker in `EVENT_HINTS`.
+- What is gone for promos made before: what was free and the shop's name, the words for the game and the team, the odds history, the hedge records, which logins have claimed and which have had starter test dollars. The vault's events are read from the chain again.
+
 Run one keeper per vault. A second one with the same keys does no harm to the vault (every step is checked on chain first), but the two compete for transaction nonces. To test against the hosted keeper: `KEEPER_URL=https://freeif-production.up.railway.app pnpm e2e`.
 
 ## Layout
