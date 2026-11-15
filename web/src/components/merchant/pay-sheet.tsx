@@ -9,7 +9,9 @@
 // Circle's window that is two screens: confirm, then pay.
 //
 // A new account holds nothing. When the keeper gives starter test dollars (its `/health` says so), the
-// balance step offers them first, once per email, and moves on to Pay by itself once they arrive.
+// balance step offers them first, once per email, and moves on to Pay by itself once they arrive. When
+// the balance still falls short, it says how many customers (or how much cover) the balance pays for, and
+// one button sets the form to that and closes the sheet.
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { EmailStep } from "@/components/email-step";
@@ -41,6 +43,9 @@ export type Order = {
   shownChance: number;
 };
 
+/** A size the balance covers, for the form to take: a number of customers, or a cover's amount in base units. */
+export type Fit = { customers: number } | { amount: bigint };
+
 type Phase =
   | { name: "checking"; note?: string }
   | { name: "short"; balance: bigint; cost: bigint }
@@ -57,6 +62,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // The keeper's answers when the login is no good: the email step comes back, as on the claim page.
 const LOGIN_AGAIN = new Set(["login", "not-your-wallet"]);
 const DOLLAR = 1_000_000n;
+const CENT = 10_000n;
 
 /** The keeper's starter test dollars: undefined while it is being asked, null when it gives none (or is too old to). */
 type Starter = StarterInfo | null | undefined;
@@ -93,7 +99,16 @@ function words(cost: string, title: string, cover: boolean): Words {
   };
 }
 
-export function PaySheet({ order, onClose }: { order: Order; onClose: () => void }) {
+type PaySheetProps = {
+  order: Order;
+  /** The most customers the form allows right now: a size the sheet offers is never above it. */
+  most: number;
+  /** Sets the form to a size the balance covers. The sheet closes itself after. */
+  onFit: (fit: Fit) => void;
+  onClose: () => void;
+};
+
+export function PaySheet({ order, most, onFit, onClose }: PaySheetProps) {
   const wallet = useWallet();
   const router = useRouter();
   const session = wallet.session;
@@ -245,8 +260,13 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
           title={title}
           address={session.address}
           starter={starter}
+          most={most}
           onPay={pay}
           onAgain={() => again()}
+          onFit={(fit) => {
+            onFit(fit);
+            onClose();
+          }}
           onClose={onClose}
         />
       )}
@@ -280,12 +300,15 @@ type StepsProps = {
   title: string;
   address: string;
   starter: Starter;
+  most: number;
   onPay: (quoted: Quoted) => void;
   onAgain: () => void;
+  /** Sets the form to a size the balance covers, and closes the sheet. */
+  onFit: (fit: Fit) => void;
   onClose: () => void;
 };
 
-function Steps({ phase, order, title, address, starter, onPay, onAgain, onClose }: StepsProps) {
+function Steps({ phase, order, title, address, starter, most, onPay, onAgain, onFit, onClose }: StepsProps) {
   const cover = order.cover !== undefined;
   if (phase.name === "checking") {
     return (
@@ -298,7 +321,17 @@ function Steps({ phase, order, title, address, starter, onPay, onAgain, onClose 
 
   if (phase.name === "short") {
     return (
-      <AddMoney balance={phase.balance} cost={phase.cost} address={address} order={order} starter={starter} onAgain={onAgain} onClose={onClose} />
+      <AddMoney
+        balance={phase.balance}
+        cost={phase.cost}
+        address={address}
+        order={order}
+        starter={starter}
+        most={most}
+        onAgain={onAgain}
+        onFit={onFit}
+        onClose={onClose}
+      />
     );
   }
 
@@ -369,17 +402,47 @@ type AddMoneyProps = {
   address: string;
   order: Order;
   starter: Starter;
+  /** The most customers the form allows right now. */
+  most: number;
   /** Reads the balance again, and moves on to Pay when it is enough. */
   onAgain: () => void;
+  /** Sets the form to a size the balance covers, and closes the sheet. */
+  onFit: (fit: Fit) => void;
   /** Closes the sheet, back to the form. */
   onClose: () => void;
 };
 
+type Advice = { text: string; fit: { label: string; size: Fit } | null };
+
+/**
+ * What to change on the form so a short balance fits. The cost grows about in step with the size, so the
+ * balance's share of it is the size that fits; a cent is held back because a smaller price is rounded up
+ * to a cent too. The balance is short of `cost`, so the size offered is always below the one asked for,
+ * and a press can never land on the same size again. The text and the button carry the same number.
+ */
+function whatFits(spendable: bigint, cost: bigint, order: Order, most: number): Advice {
+  const budget = spendable > CENT ? spendable - CENT : 0n;
+  if (order.cover !== undefined) {
+    // In whole dollars, rounded down.
+    const amount = ((budget * BigInt(order.request.payoutPerClaim)) / cost / DOLLAR) * DOLLAR;
+    if (amount < DOLLAR) return { text: "Your balance is too low for this amount. Lower it and try again.", fit: null };
+    return { text: `Your balance covers about ${usd(amount)}.`, fit: { label: `Make it ${usd(amount)}`, size: { amount } } };
+  }
+  // Never above what the form allows (it allows at least 1).
+  const customers = Math.min(Number((budget * BigInt(order.request.maxClaims)) / cost), Math.max(most, 1));
+  if (customers < 1) {
+    return { text: "Your balance doesn't cover one customer. Lower the item's price, or pick the other team.", fit: null };
+  }
+  const people = `${customers} customer${customers === 1 ? "" : "s"}`;
+  return { text: `Your balance covers about ${people}.`, fit: { label: `Make it ${people}`, size: { customers } } };
+}
+
 /**
  * The balance is short. With starter test dollars on offer (and not had yet by this account), that comes
- * first; otherwise how to add money, and, once the starter dollars were had, what to change so it fits.
+ * first; otherwise how to add money, and, once the starter dollars were had or when they are not on offer
+ * and the account holds something, what fits, with a button that sets the form to it.
  */
-function AddMoney({ balance, cost, address, order, starter, onAgain, onClose }: AddMoneyProps) {
+function AddMoney({ balance, cost, address, order, starter, most, onAgain, onFit, onClose }: AddMoneyProps) {
   const wallet = useWallet();
   const had = useLocal<Record<string, true>>(KEYS.starter, NO_STARTER)[address.toLowerCase()] === true;
   const [open, setOpen] = useState(false);
@@ -435,25 +498,11 @@ function AddMoney({ balance, cost, address, order, starter, onAgain, onClose }: 
     );
   }
 
-  // Once the starter dollars were had and still fall short: what to change on the form so it fits. The
-  // cost grows about in step with the size, so the balance's share of it is the size that fits.
+  // What to change on the form so it fits: after the starter dollars still fall short, or when they are
+  // not on offer and the account holds something to size against. An empty account only sees how to add money.
   const spendable = balance > FEE_BUFFER ? balance - FEE_BUFFER : 0n;
-  let advice: string | null = null;
-  if (had && cost > 0n) {
-    if (cover) {
-      const fits = (spendable * BigInt(order.request.payoutPerClaim)) / cost;
-      advice =
-        fits >= DOLLAR
-          ? `Your balance covers about ${usd(fits)}. Lower the amount and try again.`
-          : "Your balance is too low for this amount. Lower it and try again.";
-    } else {
-      const fits = Number((spendable * BigInt(order.request.maxClaims)) / cost);
-      advice =
-        fits > 0
-          ? `Your balance covers about ${fits} customer${fits === 1 ? "" : "s"}. Lower the number of customers to ${fits} and try again.`
-          : "Your balance doesn't cover one customer. Lower the item's price, or pick the other team.";
-    }
-  }
+  const advice = cost > 0n && (had || spendable > 0n) ? whatFits(spendable, cost, order, most) : null;
+  const fit = advice?.fit ?? null;
 
   return (
     <div className="space-y-4">
@@ -467,8 +516,11 @@ function AddMoney({ balance, cost, address, order, starter, onAgain, onClose }: 
       </p>
       {advice && (
         <>
-          <p className="text-[15px]">{advice}</p>
-          <Button onClick={onClose}>{cover ? "Change the amount" : "Change the promo"}</Button>
+          <p className="text-[15px]">{advice.text}</p>
+          {fit && <Button onClick={() => onFit(fit.size)}>{fit.label}</Button>}
+          <Button variant={fit ? "secondary" : "primary"} onClick={onClose}>
+            {cover ? "Change the amount" : "Change the promo"}
+          </Button>
         </>
       )}
       {!open ? (

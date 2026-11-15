@@ -10,7 +10,7 @@ import Link from "next/link";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { CashOut } from "@/components/cash-out";
 import { GamePicker, type Pick } from "@/components/merchant/game-picker";
-import { PaySheet, type Order } from "@/components/merchant/pay-sheet";
+import { PaySheet, type Fit, type Order } from "@/components/merchant/pay-sheet";
 import { PriceCard, usePrice } from "@/components/merchant/price-card";
 import { WeatherPicker } from "@/components/merchant/weather-picker";
 import { ReceiptCard } from "@/components/receipt-card";
@@ -142,6 +142,21 @@ export function MerchantForm() {
       shownCost: price.breakdown.cost,
       shownChance: price.breakdown.chance,
     });
+  }
+
+  /** The Pay sheet found the balance short, and the merchant took the size it covers. The sheet closes after. */
+  function fitTo(fit: Fit) {
+    if ("customers" in fit) {
+      setCount(Math.max(Math.min(fit.customers, most), 1));
+      return;
+    }
+    const dollars = fit.amount / DOLLAR;
+    if (dollars < 1n) return;
+    setAmountText(`${dollars}.00`);
+    // Not typed by the merchant: like the default, it may still come down by itself to what the vault can
+    // cover. It never goes up by itself: the price only ever brings an untyped amount down, when it is over
+    // the vault's limit.
+    setAmountTyped(false);
   }
 
   const thing = cover ? "cover" : "promo";
@@ -366,7 +381,7 @@ export function MerchantForm() {
       {/* On a phone the Pay button stays at the bottom of the screen. */}
       <div className="no-print fixed inset-x-0 bottom-0 z-30 border-t border-line bg-paper/95 p-4 backdrop-blur md:hidden">{payButton}</div>
 
-      {order && <PaySheet order={order} onClose={() => setOrder(null)} />}
+      {order && <PaySheet order={order} most={most} onFit={fitTo} onClose={() => setOrder(null)} />}
       <Sheet open={loginOpen && !wallet.session} onClose={() => setLoginOpen(false)} title="Log in">
         <div className="space-y-3">
           <p className="text-[15px]">Enter your email. We&apos;ll send a 6-digit code.</p>
