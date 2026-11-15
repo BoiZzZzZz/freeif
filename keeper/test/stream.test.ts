@@ -1,6 +1,6 @@
 // The feed: the QuickNode Stream's filter run as QuickNode runs it, the decoding of a delivery, the two
 // ways an event reaches the feed, and the webhook and the event stream through the HTTP app.
-// test/fixtures/vault-logs.json is thirteen real logs of the deployed vault, as Arc's RPC and QuickNode's
+// test/fixtures/vault-logs.json is thirteen real logs of the first vault, as Arc's RPC and QuickNode's
 // logs dataset both give them.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -25,10 +25,16 @@ type ChainLog = {
   logIndex: Hex;
 };
 
-const VAULT: Address = "0x68a00243927f250dBcD9160b5d06623b62B2e06d";
+const VAULT: Address = "0x828295d7213DBA6eB281354d61801082006f72e6";
+/** The vault the fixture's logs were emitted by: the first one, whose events are the same as this one's. */
+const FIRST_VAULT = "0x68a00243927f250dbcd9160b5d06623b62b2e06d";
 const USDC: Address = "0x3600000000000000000000000000000000000000";
 const SECRET = "the-streams-secret";
-const logs = JSON.parse(readFileSync(new URL("./fixtures/vault-logs.json", import.meta.url), "utf8")) as ChainLog[];
+// The logs are the first vault's, with their address changed to the vault the filter names now: the two
+// vaults have the same ABI, so everything but the address is what the new vault emits.
+const logs = (JSON.parse(readFileSync(new URL("./fixtures/vault-logs.json", import.meta.url), "utf8")) as ChainLog[]).map((log) =>
+  log.address.toLowerCase() === FIRST_VAULT ? { ...log, address: VAULT.toLowerCase() as Address } : log,
+);
 const blockOf = (log: ChainLog): number => Number(log.blockNumber);
 const timeOf = (log: ChainLog): number => Number(log.blockTimestamp);
 /** Each event's topic hash, from the ABI. */

@@ -9,7 +9,7 @@
 // This file is the filter as it runs: `pnpm stream` uploads it. test/stream.test.ts runs it against real
 // blocks and checks every topic hash against the ABI.
 
-var VAULT = "0x68a00243927f250dbcd9160b5d06623b62b2e06d";
+var VAULT = "0x828295d7213dba6eb281354d61801082006f72e6";
 
 // keccak256 of each event's signature. "promo": topic 1 is a promo id. "account": the topic that is an
 // address, and what that address is.
