@@ -3,8 +3,11 @@
 // in a promo, the quotes that are still usable, which logins have claimed, what each promo gives away and
 // for which shop, the keeper's own tx hashes, the vault's events as the pages' feed, how each promo's
 // chance has moved, and which logins have had their starter test dollars.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+//
+// The file is stamped with the vault it belongs to. Promo ids start again at 0 on a new vault, so a file
+// read by a keeper on another vault would put one vault's words, charts and claims on the other's promos.
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import type { Address, Hex } from "viem";
 import type { Label, PendingLabel } from "./labels.ts";
 import type { OddsPoint } from "./odds.ts";
@@ -38,7 +41,9 @@ export type TxRecord = { at: number; promoId: string; action: string; hash: Hex 
  */
 export type StarterGrant = { address: Address; amount: string; at: number; txHash: Hex | null };
 
-type Data = {
+export type Data = {
+  /** The vault this file belongs to. Absent in a file from before it was stamped, and in tests. */
+  vault?: Address;
   /** keccak256(event id string) => the event. A promo stores only the hash. */
   events: Record<Hex, EventRecord>;
   /** keccak256(instrument symbol) => the contract. */
@@ -82,7 +87,7 @@ type Data = {
   };
 };
 
-const empty = (): Data => ({
+export const empty = (): Data => ({
   events: {},
   instruments: {},
   liveQuotes: {},
@@ -97,28 +102,76 @@ const empty = (): Data => ({
   txs: [],
   feed: { events: [], cursor: null, deliveries: 0, lastDeliveryAt: null },
 });
-const MAX_TXS = 2000;
+/** The most transactions kept in `txs`: the oldest go first. */
+export const MAX_TXS = 2000;
+const FILE = "keeper.json";
+const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+/** The name a vault's file is set aside under while the keeper runs on another vault. */
+export const asideName = (vault: string): string => `keeper.${vault.toLowerCase()}.json`;
+
+/** The file's contents, or null when there is no file. A file that cannot be read stops the keeper, as before. */
+function readData(file: string): Partial<Data> | null {
+  try {
+    return JSON.parse(readFileSync(file, "utf8")) as Partial<Data>;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+}
 
 export class Store {
   readonly data: Data;
   readonly #file: string | null;
 
-  /** Pass a directory to keep the data on disk, or null to keep it in memory only (tests). */
-  constructor(dir: string | null) {
+  /**
+   * Pass a directory to keep the data on disk, or null to keep it in memory only (tests). With `vault`,
+   * the file must be that vault's: a file with no stamp is taken and stamped; a file stamped for another
+   * vault is set aside as `keeper.<that vault>.json` (never deleted), and this vault's own file is taken
+   * back if one was set aside before, else the keeper starts with an empty file.
+   */
+  constructor(dir: string | null, vault?: Address | null, log: (line: string) => void = console.log) {
     if (dir === null) {
       this.#file = null;
-      this.data = empty();
+      this.data = vault ? { ...empty(), vault } : empty();
       return;
     }
     mkdirSync(dir, { recursive: true });
-    this.#file = join(dir, "keeper.json");
-    let loaded: Partial<Data> = {};
-    try {
-      loaded = JSON.parse(readFileSync(this.#file, "utf8")) as Partial<Data>;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    this.#file = join(dir, FILE);
+    let loaded = readData(this.#file);
+    if (!vault) {
+      this.data = { ...empty(), ...loaded };
+      return;
     }
-    this.data = { ...empty(), ...loaded };
+
+    const said: string[] = [];
+    const stamp = loaded?.vault;
+    if (loaded !== null && typeof stamp === "string" && stamp.toLowerCase() !== vault.toLowerCase()) {
+      // A name made from the stamp only when the stamp is an address, so a strange stamp cannot name a path.
+      let aside = join(dir, ADDRESS.test(stamp) ? asideName(stamp) : `keeper.unknown.json`);
+      if (existsSync(aside)) aside = aside.replace(/\.json$/, `.${Date.now()}.json`);
+      renameSync(this.#file, aside);
+      said.push(`${FILE} is for vault ${stamp}, and this keeper runs on ${vault}: set it aside as ${basename(aside)}`);
+      loaded = null;
+    }
+    if (loaded === null) {
+      // This vault's file, set aside when the keeper ran on another vault (or by a run that stopped half way).
+      const own = join(dir, asideName(vault));
+      const back = readData(own);
+      if (back !== null) {
+        renameSync(own, this.#file);
+        loaded = back;
+        said.push(`took back ${basename(own)}, this vault's file`);
+      } else if (said.length > 0) {
+        said.push("starting with an empty file");
+      }
+    } else if (stamp === undefined) {
+      said.push(`${FILE} had no vault: it is now stamped ${vault}`);
+    }
+    this.data = { ...empty(), ...loaded, vault };
+    if (said.length > 0) log(`[store] ${said.join("; ")}`);
+    // The stamp goes on disk at once, so the next start finds it.
+    if (stamp !== vault) this.save();
   }
 
   save(): void {

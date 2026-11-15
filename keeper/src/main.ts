@@ -22,7 +22,8 @@ const vault = config.vaultAddress();
 const usdc = config.usdcAddress();
 const timing = config.timing();
 const client = makePublicClient();
-const store = new Store(config.dataDir());
+// The file is this vault's: one stamped for another vault is set aside (store.ts).
+const store = new Store(config.dataDir(), vault);
 
 const pricerAccount = privateKeyToAccount(config.pricerKey());
 const oracleWallet = makeWalletClient(config.oracleKey());
