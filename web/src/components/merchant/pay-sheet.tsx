@@ -7,6 +7,9 @@
 // The payment is one transaction from the merchant's account: the account signs a USDC permit for
 // exactly the cost, and `createPromoWithPermit` spends it. No standing approval is left behind. In
 // Circle's window that is two screens: confirm, then pay.
+//
+// A new account holds nothing. When the keeper gives starter test dollars (its `/health` says so), the
+// balance step offers them first, once per email, and moves on to Pay by itself once they arrive.
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { EmailStep } from "@/components/email-step";
@@ -16,8 +19,8 @@ import { Sheet } from "@/components/ui/sheet";
 import { usdcBalance } from "@/lib/balance";
 import { FEE_BUFFER } from "@/lib/config";
 import { pct, usd } from "@/lib/format";
-import { keeper, KeeperError, type PriceRequest, type Quoted } from "@/lib/keeper";
-import { KEYS, NO_PROMOS, readLocal, saveLocal, useLocal, type MyPromo } from "@/lib/local";
+import { keeper, KeeperError, type PriceRequest, type Quoted, type StarterInfo } from "@/lib/keeper";
+import { KEYS, NO_PROMOS, NO_STARTER, readLocal, saveLocal, useLocal, type MyPromo } from "@/lib/local";
 import { coverTitle } from "@/lib/promo";
 import { useWallet, WalletError, type Words } from "@/lib/wallet";
 
@@ -50,6 +53,13 @@ type TxState = { state: "pending" | "done" | "failed"; promoId?: string; txHash?
 const NOT_CHARGED = "The payment didn't go through. You were not charged.";
 const EXPIRED = "That price expired. Here is the current one.";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// The keeper's answers when the login is no good: the email step comes back, as on the claim page.
+const LOGIN_AGAIN = new Set(["login", "not-your-wallet"]);
+const DOLLAR = 1_000_000n;
+
+/** The keeper's starter test dollars: undefined while it is being asked, null when it gives none (or is too old to). */
+type Starter = StarterInfo | null | undefined;
 
 /**
  * Our words on Circle's two screens. What cannot be changed: the signing screen keeps the lead-in
@@ -94,6 +104,25 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
   const cover = order.cover !== undefined;
   const title = order.cover ? coverTitle(order.request.payoutPerClaim, business, order.cover.condition) : order.title;
   const thing = cover ? "cover" : "promo";
+  const [starter, setStarter] = useState<Starter>(undefined);
+
+  // Whether the keeper gives starter test dollars, asked once per sheet so the answer is there by the time
+  // a balance turns out short. A keeper that is slow, unreachable or older than them gives none.
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 8000);
+    keeper
+      .health(controller.signal)
+      .then(
+        (health) => setStarter(health.starter ?? null),
+        () => setStarter(null),
+      )
+      .finally(() => window.clearTimeout(timer));
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, []);
 
   /** The balance, then a fresh signed price. Ends in "short", "confirm" or "error". */
   const prepare = useCallback(
@@ -210,7 +239,16 @@ export function PaySheet({ order, onClose }: { order: Order; onClose: () => void
       ) : business === "" ? (
         <BusinessStep cover={cover} />
       ) : (
-        <Steps phase={phase} order={order} title={title} address={session.address} onPay={pay} onAgain={() => again()} onClose={onClose} />
+        <Steps
+          phase={phase}
+          order={order}
+          title={title}
+          address={session.address}
+          starter={starter}
+          onPay={pay}
+          onAgain={() => again()}
+          onClose={onClose}
+        />
       )}
     </Sheet>
   );
@@ -241,12 +279,13 @@ type StepsProps = {
   /** The headline: what is free, or what the business gets. */
   title: string;
   address: string;
+  starter: Starter;
   onPay: (quoted: Quoted) => void;
   onAgain: () => void;
   onClose: () => void;
 };
 
-function Steps({ phase, order, title, address, onPay, onAgain, onClose }: StepsProps) {
+function Steps({ phase, order, title, address, starter, onPay, onAgain, onClose }: StepsProps) {
   const cover = order.cover !== undefined;
   if (phase.name === "checking") {
     return (
@@ -258,7 +297,9 @@ function Steps({ phase, order, title, address, onPay, onAgain, onClose }: StepsP
   }
 
   if (phase.name === "short") {
-    return <AddMoney balance={phase.balance} cost={phase.cost} address={address} thing={cover ? "cover" : "promo"} onAgain={onAgain} />;
+    return (
+      <AddMoney balance={phase.balance} cost={phase.cost} address={address} order={order} starter={starter} onAgain={onAgain} onClose={onClose} />
+    );
   }
 
   if (phase.name === "confirm") {
@@ -321,17 +362,119 @@ function Steps({ phase, order, title, address, onPay, onAgain, onClose }: StepsP
   );
 }
 
-function AddMoney({ balance, cost, address, thing, onAgain }: { balance: bigint; cost: bigint; address: string; thing: string; onAgain: () => void }) {
+type AddMoneyProps = {
+  balance: bigint;
+  /** What this promo or cover costs. */
+  cost: bigint;
+  address: string;
+  order: Order;
+  starter: Starter;
+  /** Reads the balance again, and moves on to Pay when it is enough. */
+  onAgain: () => void;
+  /** Closes the sheet, back to the form. */
+  onClose: () => void;
+};
+
+/**
+ * The balance is short. With starter test dollars on offer (and not had yet by this account), that comes
+ * first; otherwise how to add money, and, once the starter dollars were had, what to change so it fits.
+ */
+function AddMoney({ balance, cost, address, order, starter, onAgain, onClose }: AddMoneyProps) {
+  const wallet = useWallet();
+  const had = useLocal<Record<string, true>>(KEYS.starter, NO_STARTER)[address.toLowerCase()] === true;
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [asking, setAsking] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const cover = order.cover !== undefined;
+  const thing = cover ? "cover" : "promo";
   const missing = cost + FEE_BUFFER - balance;
+
+  async function getStarter() {
+    const session = wallet.session;
+    if (!session) return;
+    const remember = () =>
+      saveLocal(KEYS.starter, { ...readLocal<Record<string, true>>(KEYS.starter, NO_STARTER), [session.address.toLowerCase()]: true });
+    setAsking(true);
+    try {
+      // The login token goes with it: the keeper asks Circle whose account this is, as for a claim.
+      await keeper.starter(session.address, session.userToken);
+      remember();
+      onAgain();
+    } catch (err) {
+      setAsking(false);
+      if (err instanceof KeeperError && LOGIN_AGAIN.has(err.code)) {
+        // Forgotten, so the email step is there again; the sheet picks up after it.
+        wallet.logout();
+        return;
+      }
+      if (err instanceof KeeperError && err.code === "already") remember();
+      setMessage(err instanceof KeeperError ? err.message : "Something went wrong. Try again in a moment.");
+    }
+  }
+
+  // Asked once per sheet; it is almost always back before the balance is.
+  if (starter === undefined) return <p className="text-[15px] text-ink/60">Checking the price…</p>;
+
+  if (asking) {
+    return (
+      <div className="flex items-center gap-3 py-4" role="status">
+        <span className="size-4 animate-spin rounded-full border-2 border-line border-t-ink" />
+        <span className="text-[16px]">Getting your test dollars</span>
+      </div>
+    );
+  }
+
+  if (starter !== null && starter.left > 0 && !had && message === null && balance < BigInt(starter.amount)) {
+    const amount = usd(starter.amount);
+    return (
+      <div className="space-y-4">
+        <p className="text-[15px]">This demo runs on test dollars. You can get {amount} to try it, once per email.</p>
+        <Button onClick={() => void getStarter()}>Get {amount} in test dollars</Button>
+      </div>
+    );
+  }
+
+  // Once the starter dollars were had and still fall short: what to change on the form so it fits. The
+  // cost grows about in step with the size, so the balance's share of it is the size that fits.
+  const spendable = balance > FEE_BUFFER ? balance - FEE_BUFFER : 0n;
+  let advice: string | null = null;
+  if (had && cost > 0n) {
+    if (cover) {
+      const fits = (spendable * BigInt(order.request.payoutPerClaim)) / cost;
+      advice =
+        fits >= DOLLAR
+          ? `Your balance covers about ${usd(fits)}. Lower the amount and try again.`
+          : "Your balance is too low for this amount. Lower it and try again.";
+    } else {
+      const fits = Number((spendable * BigInt(order.request.maxClaims)) / cost);
+      advice =
+        fits > 0
+          ? `Your balance covers about ${fits} customer${fits === 1 ? "" : "s"}. Lower the number of customers to ${fits} and try again.`
+          : "Your balance doesn't cover one customer. Lower the item's price, or pick the other team.";
+    }
+  }
+
   return (
     <div className="space-y-4">
+      {message && (
+        <p role="alert" className="text-[15px]">
+          {message}
+        </p>
+      )}
       <p className="text-[15px]">
         Your balance is <span className="num">{usd(balance)}</span>. Add <span className="num">{usd(missing)}</span> to start this {thing}.
       </p>
+      {advice && (
+        <>
+          <p className="text-[15px]">{advice}</p>
+          <Button onClick={onClose}>{cover ? "Change the amount" : "Change the promo"}</Button>
+        </>
+      )}
       {!open ? (
-        <Button onClick={() => setOpen(true)}>Add money</Button>
+        <Button variant={advice ? "secondary" : "primary"} onClick={() => setOpen(true)}>
+          Add money
+        </Button>
       ) : (
         <div className="space-y-3 rounded-[10px] border border-line bg-card p-4 text-[15px]">
           <p>Card payments are coming. For this demo, send test dollars to your account&apos;s address:</p>
@@ -346,7 +489,7 @@ function AddMoney({ balance, cost, address, thing, onAgain }: { balance: bigint;
           </Button>
         </div>
       )}
-      <Button variant={open ? "primary" : "secondary"} onClick={onAgain}>
+      <Button variant={open && !advice ? "primary" : "secondary"} onClick={onAgain}>
         Check again
       </Button>
     </div>

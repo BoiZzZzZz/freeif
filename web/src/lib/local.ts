@@ -70,6 +70,8 @@ export const KEYS = {
   claims: "freeif.claims",
   /** "1" when the mechanics view is on. */
   mechanics: "freeif.mechanics",
+  /** Accounts that have had their starter test dollars: address in lower case -> true. The keeper is the judge; this only picks what the Pay sheet offers. */
+  starter: "freeif.starter",
 } as const;
 
 /**
@@ -84,3 +86,4 @@ export type MyPromo = { id: string; tx: string; at: number };
 // Fallbacks are shared constants: a new `[]` on every render would look like a change.
 export const NO_PROMOS: MyPromo[] = [];
 export const NO_CLAIMS: Record<string, string> = {};
+export const NO_STARTER: Record<string, true> = {};

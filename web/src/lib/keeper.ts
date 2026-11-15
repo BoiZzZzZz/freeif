@@ -282,7 +282,9 @@ export type Vault = {
   events: FeedEvent[];
 };
 
-/** The keeper's answer to a promo's cards: accepted, and registered one at a time after it. */
+/** Starter test dollars: what one email login gets (base units), and how many more the keeper can give right now. */
+export type StarterInfo = { amount: string; left: number };
+
 /** The keeper's `GET /health`: which vault and keys it runs with, and what the Stream has delivered. */
 export type Health = {
   ok: boolean;
@@ -294,8 +296,11 @@ export type Health = {
   block: number;
   commit: string | null;
   stream: { deliveries: number; lastDeliveryAt: number | null; events: number; byStream: number };
+  /** Null when the keeper gives no starter test dollars; absent from keepers before them. */
+  starter?: StarterInfo | null;
 };
 
+/** The keeper's answer to a promo's cards: accepted, and registered one at a time after it. */
 export type CardsAccepted = {
   promoId: string;
   cards: number;
@@ -386,7 +391,13 @@ export const keeper = {
   sendCards: (promoId: string, cards: string[], userToken: string) =>
     call<CardsAccepted>(`/promos/${encodeURIComponent(promoId)}/cards`, { cards, userToken }),
 
-  /** Which vault the keeper runs with, and the Stream's deliveries: the mechanics view's footer. */
+  /**
+   * Starter test dollars, once per email login: the keeper asks Circle whose `userToken` is, and sends them
+   * to `address`, which must be that login's account. Answers once they have arrived.
+   */
+  starter: (address: string, userToken: string) => call<{ amount: string; txHash: string }>("/starter", { address, userToken }),
+
+  /** Which vault the keeper runs with, the Stream's deliveries, and the starter test dollars. */
   health: (signal?: AbortSignal) => call<Health>("/health", undefined, signal),
 
   /** The vault's books, every promo, and the newest events: the page for liquidity providers. */
