@@ -25,6 +25,7 @@ pnpm abi          # rewrite src/abi.ts after a contract change (run `forge build
 pnpm ship         # deploy the pushed commit to Railway and wait for it
 pnpm stream on    # start the QuickNode Stream at the newest block (also: status, test, off, remove)
 pnpm topup        # move test USDC from the pricer (which spends none) to a wallet that is low; --list, --to, --amount, --send
+pnpm backup       # pull a copy of the keeper's file to this laptop; --watch [minutes], --restore [file], --force
 ```
 
 Test USDC: Circle's faucet API refuses this project's key (403; it needs an account upgraded to mainnet) and the public faucet at faucet.circle.com is a web page behind a captcha (20 USDC per address every 2 hours). The pricer wallet only signs and never sends, so its USDC is spare: `pnpm topup` moves it to the test merchant (by default up to $5), the deployer for a vault deposit, or any address. Without `--send` it only says what it would do, and it never takes a sending wallet below $5.
@@ -46,6 +47,7 @@ Settings come from the environment. On a developer machine they are read from `~
 | `GEMINI_SANDBOX_KEY`, `GEMINI_SANDBOX_SECRET` | Optional. An API key of a Gemini sandbox account (`https://exchange.sandbox.gemini.com`), for the hedge orders. Unset, every hedge is written down as simulated. `GEMINI_SANDBOX_BASE` defaults to `https://api.sandbox.gemini.com` |
 | `QUICKNODE_STREAM_SECRET` | The secret the Stream proves itself with (its security token, and the header `x-stream-secret`). Unset, `POST /stream` refuses every delivery and the feed is read from the chain alone |
 | `QUICKNODE_API_KEY` | Only for `pnpm stream`: a QuickNode API key with the Streams permission |
+| `BACKUP_KEY` | Optional. A secret that `GET /backup` and `POST /restore` ask for in the header `X-Backup-Key` (below, "When the keeper's file is lost"). Unset, both answer 404 `off`. `pnpm backup` reads the same name from `secrets.env`, and `pnpm rehost` copies it to Railway |
 | `FEED_RPC_MS`, `FEED_GRACE_MS`, `FEED_START_BLOCK` | The keeper's own read of the vault's logs: how often (2000), how long a log waits for the Stream first (4000), and where the first read starts (default: the vault's first block, found by itself) |
 | `USDC_ADDRESS`, `GEMINI_BASE` | Defaults: Arc testnet USDC, `https://api.gemini.com` |
 | `PORT`, `KEEPER_LOOP_MS`, `KEEPER_RETRY_MS`, `KEEPER_DATA_DIR` | Defaults: 8787, 30000, 600000, `./data` |
@@ -76,6 +78,8 @@ Amounts are USDC base units (6 decimals) as decimal strings. Times are unix seco
 | `POST /stream` | The QuickNode Stream's webhook. Takes a delivery with QuickNode's signature or with the secret header; answers 401 to anything else |
 | `GET /vault` | The vault as a liquidity provider reads it: `balance`, `locked`, `pending` (the locks of promos with no final result), `free` (what a withdrawal is priced on), `depositBasis` (what a deposit is priced on), `totalShares`, the two limits, `netEarned`, every promo with what it locks, what it made and, while it has no result, its `chance` at the newest reading of Gemini's book, its `hedge`, and the newest events. One read of the chain, shared for two seconds |
 | `GET /intervals?series=BTC05M` | The next windows of a 5 or 15-minute crypto market (the test loop) |
+| `GET /backup` | The whole of the keeper's file, for `pnpm backup`. Needs the header `X-Backup-Key: <BACKUP_KEY>`. Answers `{ meta: { version: 1, vault, at, commit, settings }, data }`: the vault the file belongs to, when (unix seconds), the commit `GET /health` names, and the plain settings the keeper runs with (those of `CARDS_FROM_PROMO`, `STARTER_AMOUNT`, `STARTER_BUDGET`, `STARTER_FLOOR` and `EVENT_HINTS` that are set, as strings), for `pnpm rehost`. The file holds no key and no login token: logins are kept as SHA-256 hashes. 404 `off` when the keeper has no `BACKUP_KEY`, 401 `unauthorized` without the right header |
+| `POST /restore` | Merges a backup (the body, as `GET /backup` gives it, up to 50 MB) into the keeper's file; the same header. What the keeper already has wins, so a restore never takes anything away and the same backup restored twice changes nothing the second time (below, "What a restore merges"). Answers `{ ok: true, from: { at, commit }, added }`, `added` counting what was added section by section. 400 `bad-request` for a body that is not a backup, 409 `other-vault` for a backup of another vault, 413 `too-large`, and 404 and 401 as for `GET /backup` |
 
 `claimDeadline` is `start` (the default: the promo takes customers until the event starts), `30min` (until 30 minutes before) or a unix time no later than the start. The start is kickoff for a game. A daily temperature market has no start time on Gemini: its day is taken to begin 24 hours before the market closes (it closes at 04:59:59 UTC, the end of the day in Eastern time), and nothing is sold on it after that, because from then on the high is being measured. Any other event with no start time is refused (`unknown-event`), for a price and for a quote: nothing says when its result begins to be known.
 
@@ -95,6 +99,7 @@ None of these routes needs a login, so a client is the address its request came 
 | `POST /starter` (two calls to Circle each, and a transfer) | 5 a minute |
 | `GET /intervals` (four reads of Gemini each) | 20 a minute |
 | `GET /health/rpc` | 6 a minute |
+| `GET /backup`, `POST /restore` (a few megabytes each) | 6 a minute, each |
 | Event streams open at once (`/events`, `/promos/:id/events`) | 60, and 1,000 in all |
 
 The numbers are set for a room of people behind one address to pass (a page that shows a promo asks about six times a minute, a merchant form four) and for a loop to stop. They do not stop someone who comes from many addresses, and they do not stop one address from holding the vault's room: a single signed quote at the most the vault can take keeps that room for its 90 seconds. `GET /health` is left out because the web app's own server asks it for the vault's address; the webhook has its own proof. The numbers are `LIMITS` in `src/limit.ts`.
@@ -194,16 +199,42 @@ When the keeper says the new promo is a card promo (`cards: true`, so `CARDS_FRO
 
 The keeper runs on Railway at `https://freeif-production.up.railway.app`, built from `Dockerfile` with `keeper/` as the service's root folder. Its file is on a volume mounted at `/data` (`KEEPER_DATA_DIR=/data`), so a redeploy keeps the record of which logins have claimed. The health check is `GET /health`, which also names the commit that is live.
 
+The file is stamped with the vault it belongs to, because promo ids start again at 0 on a new vault. A keeper started on another vault sets a file stamped for the old one aside as `keeper.<old vault>.json` (it is never deleted) and starts with an empty file, or takes back `keeper.<its vault>.json` if one was set aside before. A file from before the stamp is taken and stamped. The log says so in one line.
+
 To deploy: push to `main`, then `pnpm ship`. It asks Railway to build the pushed commit and waits until the new build passes its health check (about a minute); if the build fails, the previous one keeps serving. It needs `RAILWAY_API_TOKEN`, `RAILWAY_SERVICE_ID` and `RAILWAY_ENVIRONMENT_ID`.
 
 ### When the keeper's file is lost
 
-On Nov 15 2026 Railway's own system removed the project 48 hours after it was made, with the volume (the workspace was on the trial plan; Railway's audit log names the actor as "system" and its documentation gives no rule for it). The keeper was away for about 14 hours and came back at the same address.
+On Nov 15 2026 Railway's own system removed the project 48 hours after it was made, with the volume (the workspace was on the trial plan; Railway's audit log names the actor as "system" and its documentation gives no rule for it). The keeper was away for about 14 hours and came back at the same address, without its file: what was free and the shop's name, the words for the game and the team, the odds history, the hedge records, which logins had claimed and which had had starter test dollars were gone.
 
-- `pnpm rehost [NAME=value ...]` makes the project again: service, variables (secrets by name from `secrets.env`, plain settings as arguments), volume, settings, the public domain and the source repo. Then `pnpm ship`. It needs `RAILWAY_WORKSPACE_ID`.
-- Money is not in the file. The vault holds every promo, claim and lock, and a result can be posted at any time after the claims close, so the promos that closed while the keeper was away were settled when it came back.
-- What a new keeper has to find again: each open promo's Gemini event. It looks through the 500 events Gemini settled most recently; for an older one, name its ticker in `EVENT_HINTS`.
-- What is gone for promos made before: what was free and the shop's name, the words for the game and the team, the odds history, the hedge records, which logins have claimed and which have had starter test dollars. The vault's events are read from the chain again.
+**Keep a copy.** With `BACKUP_KEY` set on the keeper and in `secrets.env`, leave this running on the laptop:
+
+```
+pnpm backup --watch          # a pull every 10 minutes (or: --watch 5)
+```
+
+Each pull of `GET /backup` is written to `~/.freeif/backups` (or `FREEIF_BACKUP_DIR`) as `keeper-<first 8 hex of the vault>-<UTC time>.json`, unless its data is the last pull's (the feed's cursor aside, which moves every two seconds), and the newest 300 per vault are kept. It also becomes `latest-<vault>.json`, unless it holds fewer promo labels or fewer odds readings than the latest already there (a promo whose readings the keeper thinned is not counted as a loss): a keeper that was just made again is empty, and its backup must not replace the good one. The script then warns instead, and `pnpm backup --force` overrides it. When Railway answers 404 for the keeper (`x-railway-fallback`), `--watch` says so loudly every minute, with the three steps below. Any other failure is one line, and it keeps going.
+
+**Bring it back**, from `keeper/`:
+
+1. Delete `~/.freeif/railway.json` (it names the project that was), then `pnpm rehost [NAME=value ...]`. It makes the project again: service, variables (secrets by name from `secrets.env`; plain settings as arguments, and the ones not given from the newest backup of the vault, which it names), volume, settings, the public domain and the source repo. It needs `RAILWAY_WORKSPACE_ID`.
+2. `pnpm ship`.
+3. `pnpm backup --restore`. It posts `latest-<vault>.json`, for the vault the keeper's `GET /health` names, to `POST /restore` and prints what was added. `pnpm backup --restore <file>` posts another one.
+
+A backup is at most one interval old, so what happened after the last pull is still lost, except what the chain holds.
+
+- Money is not in the file. The vault holds every promo, claim and lock, and a result can be posted at any time after the claims close, so the promos that closed while the keeper was away are settled when it comes back.
+- The vault's events are read from the chain again by the new keeper itself; the restore puts back how each first came (`via`).
+- A promo that was not in the backup has to have its Gemini event found again: the keeper looks through the 500 events Gemini settled most recently; for an older one, name its ticker in `EVENT_HINTS`.
+
+**What a restore merges.** What the live keeper already has wins; a restore only adds, so it can be run at any time, and twice.
+
+- The event and contract names, the labels, each promo's first reading, the pending labels and readings, which logins have claimed (per promo, per login) and the starter grants: the entries the live file lacks. A starter grant the live file holds without knowing whether its transfer went out takes the backup's transaction hash.
+- Signed quotes: only those still usable.
+- Odds readings: the backup's readings before the live keeper's first and after its last, kept within 4,000 per promo as the keeper keeps them. Inside the live keeper's own span its readings stand, since it may have thinned them.
+- Hedges: the missing ones, and the backup's sandbox order where the live keeper only has a simulated one.
+- The keeper's transactions: by hash, by time, the newest 2,000. The feed: by event, in chain order, the newest 5,000; where both have an event, the copy the Stream delivered. The live keeper's own read of the chain goes on from its own block; the Stream's counts take the larger.
+- A promo whose `PromoCreated` the new keeper had read from the chain before the restore gets its label and first reading from the backup's pending ones, as the feed would have given them.
 
 Run one keeper per vault. A second one with the same keys does no harm to the vault (every step is checked on chain first), but the two compete for transaction nonces. To test against the hosted keeper: `KEEPER_URL=https://freeif-production.up.railway.app pnpm e2e`.
 
@@ -225,5 +256,6 @@ Run one keeper per vault. A second one with the same keys does no harm to the va
 | `stream/filter.js`, `scripts/stream.ts` | The QuickNode Stream's filter, and the script that makes, tests, pauses and removes the Stream |
 | `src/server.ts`, `src/main.ts` | The HTTP API and the process |
 | `src/limit.ts` | How much one address may ask of the open routes, and how many event streams may be open |
+| `src/backup.ts`, `scripts/backup.mjs` | A backup of the keeper's file: reading one, and the merge `POST /restore` makes; the script that pulls backups to the laptop and posts one back |
 | `src/gemini.ts`, `src/chain.ts`, `src/store.ts`, `src/config.ts` | Gemini's API, Arc (its endpoints and which one is asked) and the quote's EIP-712 types, the JSON file, settings |
 | `src/abi.ts` | Generated from the contract build |
