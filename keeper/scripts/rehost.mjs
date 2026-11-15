@@ -6,16 +6,19 @@
 //
 // Secrets are copied from secrets.env by name. Plain settings are given as NAME=value, for example
 //   pnpm rehost CARDS_FROM_PROMO=0 STARTER_AMOUNT=5 EVENT_HINTS=NBA-2611152300-NYK-TOR-M
+// A plain setting that is not given is taken from the newest backup of the vault (`pnpm backup` keeps
+// latest-<vault>.json, which names the settings the keeper ran with), and the script says which.
 // Needs RAILWAY_API_TOKEN and RAILWAY_WORKSPACE_ID in secrets.env. It writes RAILWAY_PROJECT_ID,
 // RAILWAY_SERVICE_ID and RAILWAY_ENVIRONMENT_ID back into secrets.env (a copy is kept beside it), which
 // is what `pnpm ship` reads. Each step is written to ~/.freeif/railway.json as it is done, so a run that
 // stopped half way goes on from there; delete that file to start a new project.
-// It prints ids and names only, never a value.
+// It prints ids, names and the plain settings, never a secret's value.
 //
-// What a new keeper does not have: its file. See README, "When the keeper's file is lost".
+// What a new keeper does not have: its file. After `pnpm ship`, `pnpm backup --restore` puts the newest
+// backup back. See README, "When the keeper's file is lost".
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const dir = join(homedir(), ".freeif");
 const secretsPath = process.env.FREEIF_SECRETS ?? join(dir, "secrets.env");
@@ -30,9 +33,24 @@ const token = need("RAILWAY_API_TOKEN");
 const workspaceId = need("RAILWAY_WORKSPACE_ID");
 const REPO = "BoiZzZzZz/freeif";
 const DOMAIN = "freeif-production.up.railway.app";
-// Copied from secrets.env. The last five are optional: a keeper runs without them.
+// Copied from secrets.env. The second list is optional: a keeper runs without them.
 const SECRETS = ["VAULT_ADDRESS", "USDC_ADDRESS", "PRICER_PK", "ORACLE_PK", "RELAYER_PK", "ARC_RPC_URL"];
-const OPTIONAL = ["QUICKNODE_ARC_RPC_URL", "CIRCLE_API_KEY", "CLAIM_TEST_KEY", "QUICKNODE_STREAM_SECRET", "GEMINI_SANDBOX_KEY", "GEMINI_SANDBOX_SECRET"];
+const OPTIONAL = ["QUICKNODE_ARC_RPC_URL", "CIRCLE_API_KEY", "CLAIM_TEST_KEY", "QUICKNODE_STREAM_SECRET", "GEMINI_SANDBOX_KEY", "GEMINI_SANDBOX_SECRET", "BACKUP_KEY"];
+// Plain settings: given as NAME=value, or else taken from the newest backup of the vault.
+const PLAIN = ["CARDS_FROM_PROMO", "STARTER_AMOUNT", "STARTER_BUDGET", "STARTER_FLOOR", "EVENT_HINTS"];
+
+/** The plain settings the newest backup of the vault names (`pnpm backup` keeps it), and its file. */
+function settingsFromBackup(vault) {
+  const backups = process.env.FREEIF_BACKUP_DIR || join(dirname(secretsPath), "backups");
+  const file = join(backups, `latest-${vault.toLowerCase()}.json`);
+  if (!existsSync(file)) return { file: null, settings: {} };
+  try {
+    return { file, settings: JSON.parse(readFileSync(file, "utf8"))?.meta?.settings ?? {} };
+  } catch (err) {
+    console.log(`the backup ${file} cannot be read (${err.message}): plain settings only as given`);
+    return { file, settings: {} };
+  }
+}
 
 const statePath = join(dir, "railway.json");
 const state = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : {};
@@ -80,6 +98,18 @@ await step("variables", async () => {
     if (at < 1) throw new Error(`"${arg}" is not NAME=value`);
     variables[arg.slice(0, at)] = arg.slice(at + 1);
   }
+  // The plain settings not given: the ones the keeper ran with, as its newest backup names them.
+  const backup = settingsFromBackup(variables.VAULT_ADDRESS);
+  const fromBackup = [];
+  for (const name of PLAIN) {
+    const value = backup.settings[name];
+    if (variables[name] !== undefined || typeof value !== "string" || value === "") continue;
+    variables[name] = value;
+    fromBackup.push(`${name}=${value}`);
+  }
+  if (backup.file === null) console.log(`no backup of vault ${variables.VAULT_ADDRESS} found: plain settings only as given`);
+  else if (fromBackup.length > 0) console.log(`from the backup ${backup.file}: ${fromBackup.join(" ")}`);
+  else console.log(`the backup ${backup.file} names no plain setting that was not given`);
   await railway("mutation($i: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $i) }", {
     i: { projectId, environmentId, serviceId, variables, skipDeploys: true },
   });
