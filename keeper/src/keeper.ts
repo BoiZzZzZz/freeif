@@ -23,6 +23,8 @@ type Deps = {
   /** Places a hedge order for each open promo and cancels it when the promo is over (hedge.ts). */
   hedge?: { sync: (promos: readonly HedgePromo[]) => Promise<unknown> };
   log?: (line: string) => void;
+  /** Gemini event tickers to try first when a promo's event is not in the file (`EVENT_HINTS`). */
+  eventHints?: readonly string[];
 };
 
 const PAYOUT_BATCH = 50;
@@ -180,14 +182,29 @@ export class Keeper {
     const known = this.#d.store.data.events[promo.geminiEventId];
     if (known) return match(await getEvent(known.eventTicker));
 
+    const remember = (event: GeminiEvent) => {
+      this.#d.store.data.events[promo.geminiEventId] = { eventId: event.id, eventTicker: event.ticker, title: event.title };
+      this.#d.store.save();
+    };
+
+    // A keeper that lost its file can be told which events to look at. The hash still decides: a
+    // ticker that is not this promo's event matches nothing.
+    for (const ticker of this.#d.eventHints ?? []) {
+      const event = await getEvent(ticker).catch(() => null);
+      const found = match(event);
+      if (found && event) {
+        remember(event);
+        return found;
+      }
+    }
+
     // Fallback, for a keeper that lost its file: look through the events Gemini settled most recently.
     for (let page = 0; page < SETTLED_PAGES; page++) {
       const { data } = await listEvents({ status: "settled", limit: 100, offset: page * 100 });
       for (const event of data) {
         const found = match(event);
         if (found) {
-          this.#d.store.data.events[promo.geminiEventId] = { eventId: event.id, eventTicker: event.ticker, title: event.title };
-          this.#d.store.save();
+          remember(event);
           return found;
         }
       }

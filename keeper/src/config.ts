@@ -53,6 +53,18 @@ export const circleApiKey = (): string => env("CIRCLE_API_KEY");
 export const claimTestKey = (): string | undefined => optional("CLAIM_TEST_KEY");
 
 /**
+ * Gemini event tickers, separated by commas, that the settlement loop tries first for a promo whose
+ * event is not in its file. For a keeper that lost its file while promos were open: the loop's own
+ * search only reaches the events Gemini settled most recently. Unset, there are none.
+ */
+export function eventHints(): string[] {
+  return (optional("EVENT_HINTS") ?? "")
+    .split(",")
+    .map((ticker) => ticker.trim())
+    .filter((ticker) => ticker.length > 0);
+}
+
+/**
  * Claim cards: a promo with this id or a higher one, unless it is a cover (hedge mode), is covered by
  * cards the merchant prints, and the open claim (`POST /claims`) refuses it. Unset, no promo uses cards.
  * The switch exists so that promos already open on a vault keep the way they were sold.

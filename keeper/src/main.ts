@@ -55,7 +55,7 @@ const odds = new Odds({ store, everySeconds: Math.round(timing.loopMs / 1000) })
 const sandboxSettings = config.geminiSandbox();
 if (sandboxSettings === null) console.log("[hedge] GEMINI_SANDBOX_KEY is not set: every hedge is written down as simulated");
 const hedge = new Hedger({ store, sandbox: sandboxSettings === null ? null : new Sandbox(sandboxSettings) });
-const keeper = new Keeper({ client, wallet: oracleWallet, vault, store, odds, hedge });
+const keeper = new Keeper({ client, wallet: oracleWallet, vault, store, odds, hedge, eventHints: config.eventHints() });
 const games = new Games({ spreadBps: config.pricingParams().spreadBps, minLeadSeconds: timing.minClaimWindowSeconds });
 
 // The vault's events: delivered by the QuickNode Stream to `POST /stream`, and read from the chain by
