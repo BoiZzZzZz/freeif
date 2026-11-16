@@ -2,7 +2,7 @@
 
 `PromoVault.sol`: the USDC vault that underwrites promos on Arc. One contract, a Foundry project.
 
-Deployed and verified on Arc testnet (chain 5042002): [`0x828295d7213DBA6eB281354d61801082006f72e6`](https://explorer.testnet.arc.io/address/0x828295d7213DBA6eB281354d61801082006f72e6), v2, since Nov 14 (block 72249296). The first vault, v1, is [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d): every promo until Nov 15 ran on it, and its pause also blocked `registerClaim`.
+Deployed and verified on Arc testnet (chain 5042002): [`0x828295d7213DBA6eB281354d61801082006f72e6`](https://explorer.testnet.arc.io/address/0x828295d7213DBA6eB281354d61801082006f72e6), v2, since Nov 14 (block 72249296). The first vault, v1, is [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d): every promo until Nov 16 ran on it, and its pause also blocked `registerClaim`.
 
 ```
 git submodule update --init                                 # once after cloning, from the repo's root: forge-std and OpenZeppelin

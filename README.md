@@ -82,11 +82,11 @@ flowchart TB
 
 | | |
 |---|---|
-| Vault | [`0x828295d7213DBA6eB281354d61801082006f72e6`](https://explorer.testnet.arc.io/address/0x828295d7213DBA6eB281354d61801082006f72e6) on Arc testnet (chain 5042002), verified. The first vault, [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d), ran every promo until Nov 15; its pause also blocked claims |
+| Vault | [`0x828295d7213DBA6eB281354d61801082006f72e6`](https://explorer.testnet.arc.io/address/0x828295d7213DBA6eB281354d61801082006f72e6) on Arc testnet (chain 5042002), verified. The first vault, [`0x68a00243927f250dBcD9160b5d06623b62B2e06d`](https://explorer.testnet.arc.io/address/0x68a00243927f250dBcD9160b5d06623b62B2e06d), ran every promo until Nov 16; its pause also blocked claims |
 | App | [`https://freeif.app`](https://freeif.app): [`/merchant`](https://freeif.app/merchant) sets up a promo, `/promo/[id]/cards` prints its claim cards, `/card/[id]` is a scanned card, `/claim/[id]` covers a customer on a promo with a code at the counter, `/promo/[id]` is its status page, [`/lp`](https://freeif.app/lp) is the vault for liquidity providers. Add `?mechanics=1` to see where each number comes from. Details in [`web/README.md`](web/README.md) |
 | Keeper | `https://freeif-production.up.railway.app` ([`/health`](https://freeif-production.up.railway.app/health)), API in [`keeper/README.md`](keeper/README.md) |
 | First payout (first vault) | [`0xfa5224c6…3fd5235`](https://explorer.testnet.arc.io/tx/0xfa5224c67e6c4bddfed785966555073b0739771081b9067fa3b4c747a3fd5235): three customers paid after Gemini settled a 5-minute BTC market "yes" |
-| First vault, so far (Nov 13) | 22 promos created. 19 have run to their end: 9 paid their customers, 10 ended "no". Three are open: two on Sunday's Patriots at Lions game and one on Saturday's high in Austin |
+| First vault, in all (Nov 12 to Nov 16) | 27 promos, every one run to its end: 12 paid their customers (30 payouts, $28.90 in all), 15 ended "no". The last, promo 26 on Knicks at Raptors, paid its one card $8.00 on Nov 16. The keeper then moved to the new vault |
 | Settings on the vault | `maxExposureBps` 2000 (20%), `disputeWindow` one hour, `voidGrace` 7 days: the contract's defaults, never changed. The owner is one account, the deployer. On the first vault, promos 0 to 22 ran with test values (30 seconds and 60 seconds) until Nov 13, 21:24 UTC |
 | Demo video | Added with the submission |
 
@@ -120,7 +120,7 @@ flowchart TB
 
 **The hedge.** A "yes" contract pays $1, so one contract per dollar of payout is the other side of the vault's position. In the worked example the full hedge costs $1,560 of the $1,638 premium and leaves the $78 spread, with basis risk in place of the promo's risk. For every open promo the keeper works out that order. Where Gemini's sandbox exchange lists the contract (crypto and commodity markets) it places the order and keeps its id with the promo; for a game or a temperature market, which the sandbox does not list, it records the order it would place, marked simulated. The three promos open on Nov 13 are simulated; four test promos on BTC markets had real sandbox orders. Either way no money moves, and the vault as built carries each promo's risk itself. Moving USDC to Gemini and back is not built.
 
-**What the vault has done.** On Nov 13 the first vault held $65.58 with $26.00 locked for three open promos, and was up $3.74 on the 19 promos that had finished (premiums kept, less payouts). The page has the numbers as they are now.
+**What the vault has done.** The first vault ran 27 promos. Its one depositor put in $50.00 on Nov 12 and withdrew $62.78 on Nov 16, after the last promo was paid. The new vault started with $300.00. The page has the numbers as they are now.
 
 ## Risks and assumptions
 
