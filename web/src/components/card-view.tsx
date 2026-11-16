@@ -143,16 +143,13 @@ export function CardView({ promoId }: { promoId: string }) {
   if (hash !== null && key === null) {
     return <Note>This card can&apos;t be read. Scan the code on the card again.</Note>;
   }
-  if (missing) return <Note>We couldn&apos;t find this card&apos;s promo. Check you scanned the whole code.</Note>;
-  if (unreachable) return <Note>We can&apos;t reach FreeIf right now. Keep this page open: it keeps trying.</Note>;
   const cardBalance = balance !== null && balance.of === address ? balance.value : null;
-  if (!promo || now === 0 || key === null || cardBalance === null) {
-    return (
-      <Frame>
-        <div className="h-[260px] animate-pulse rounded-[10px] border border-line bg-card" aria-label="Loading" />
-      </Frame>
-    );
-  }
+  const session = wallet.session;
+  const loading = (
+    <Frame>
+      <div className="h-[260px] animate-pulse rounded-[10px] border border-line bg-card" aria-label="Loading" />
+    </Frame>
+  );
 
   if (phase.name === "done") {
     return (
@@ -163,9 +160,62 @@ export function CardView({ promoId }: { promoId: string }) {
     );
   }
 
+  // Collect: the email step for someone not logged in, else one button.
+  const collectStep = (amount: bigint) =>
+    phase.name === "collecting" ? (
+      <p className="flex items-center gap-3 text-[16px]" role="status">
+        <span className="size-4 animate-spin rounded-full border-2 border-line border-t-ink" />
+        Collecting
+      </p>
+    ) : session ? (
+      <>
+        <Button onClick={() => void run(session)}>Collect {usd(amount)}</Button>
+        <p className="text-[14px] text-ink/60">
+          Into the account of {session.email}.{" "}
+          <button className="underline underline-offset-2" onClick={wallet.logout}>
+            Use another email
+          </button>
+        </p>
+      </>
+    ) : (
+      <EmailStep cta={`Collect ${usd(amount)}`} hint="We email you a code. The money goes into your FreeIf account." onDone={(s) => void run(s)} />
+    );
+  const collectError = phase.name === "idle" && phase.error && (
+    <p role="alert" className="text-[15px] text-stop">
+      {phase.error}
+    </p>
+  );
+
+  if (missing) {
+    // The promo is not on record here (a card from before FreeIf moved its records, for one). Money on the
+    // card is still its holder's: the card is read from its own balance, and can be collected.
+    if (key !== null && cardBalance === null) return loading;
+    if (key === null || cardBalance === null || cardBalance < CARD_DUST) {
+      return <Note>We couldn&apos;t find this card&apos;s promo. Check you scanned the whole code.</Note>;
+    }
+    return (
+      <Frame>
+        <div className="rounded-[10px] border border-line bg-card px-5 py-4">
+          <div className="flex items-center justify-between gap-3">
+            <span className="label truncate">FreeIf card</span>
+            <span className="num shrink-0 text-[12px] font-medium tracking-[0.08em] text-go">✓ READY TO COLLECT</span>
+          </div>
+          <p className="num mt-4 text-[22px] leading-7">{usd(cardBalance)}</p>
+        </div>
+        <div className="mt-6 space-y-3">
+          <h1 className="text-[22px] font-semibold leading-tight">This card is worth {usd(cardBalance)}</h1>
+          <p className="text-[16px] text-ink/60">Collect it into your FreeIf account. It takes a minute.</p>
+          {collectStep(cardBalance)}
+          {collectError}
+        </div>
+      </Frame>
+    );
+  }
+  if (unreachable) return <Note>We can&apos;t reach FreeIf right now. Keep this page open: it keeps trying.</Note>;
+  if (!promo || now === 0 || key === null || cardBalance === null) return loading;
+
   const f = face(promo, cardBalance, now);
   const tone = f.tone === "go" ? "text-go" : f.tone === "grey" ? "text-ink/60" : "text-ink";
-  const session = wallet.session;
   return (
     <Frame>
       <div className={`overflow-hidden rounded-[10px] border border-line bg-card ${f.tone === "grey" ? "text-ink/60" : ""}`}>
@@ -201,30 +251,8 @@ export function CardView({ promoId }: { promoId: string }) {
       <div className="mt-6 space-y-3">
         <h1 className="text-[22px] font-semibold leading-tight">{f.headline}</h1>
         {f.line && <p className="text-[16px] text-ink/60">{f.line}</p>}
-        {f.collectable &&
-          (phase.name === "collecting" ? (
-            <p className="flex items-center gap-3 text-[16px]" role="status">
-              <span className="size-4 animate-spin rounded-full border-2 border-line border-t-ink" />
-              Collecting
-            </p>
-          ) : session ? (
-            <>
-              <Button onClick={() => void run(session)}>Collect {usd(cardBalance)}</Button>
-              <p className="text-[14px] text-ink/60">
-                Into the account of {session.email}.{" "}
-                <button className="underline underline-offset-2" onClick={wallet.logout}>
-                  Use another email
-                </button>
-              </p>
-            </>
-          ) : (
-            <EmailStep cta={`Collect ${usd(cardBalance)}`} hint="We email you a code. The money goes into your FreeIf account." onDone={(s) => void run(s)} />
-          ))}
-        {phase.name === "idle" && phase.error && (
-          <p role="alert" className="text-[15px] text-stop">
-            {phase.error}
-          </p>
-        )}
+        {f.collectable && collectStep(cardBalance)}
+        {collectError}
       </div>
 
       <Sheet open={details} onClose={() => setDetails(false)} title="Details">
