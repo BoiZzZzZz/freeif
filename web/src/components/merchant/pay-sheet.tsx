@@ -8,21 +8,23 @@
 // exactly the cost, and `createPromoWithPermit` spends it. No standing approval is left behind. In
 // Circle's window that is two screens: confirm, then pay.
 //
-// A new account holds nothing. When the keeper gives starter test dollars (its `/health` says so), the
-// balance step offers them first, once per email, and moves on to Pay by itself once they arrive. When
-// the balance still falls short, it says how many customers (or how much cover) the balance pays for, and
-// one button sets the form to that and closes the sheet.
+// A new account holds nothing. When the keeper gives starter test dollars, the page's account gets them
+// as soon as it is logged in (`lib/account.tsx`), and this sheet waits for them before it reads the
+// balance. When the balance still falls short, it says how many customers (or how much cover) the balance
+// pays for, and one button sets the form to that and closes the sheet.
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { EmailStep } from "@/components/email-step";
+import { AddressBox } from "@/components/merchant/add-money";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet } from "@/components/ui/sheet";
-import { usdcBalance } from "@/lib/balance";
+import { useAccount } from "@/lib/account";
 import { FEE_BUFFER } from "@/lib/config";
+import { amountFor, customersFor, isShort } from "@/lib/fit";
 import { pct, usd } from "@/lib/format";
-import { keeper, KeeperError, type PriceRequest, type Quoted, type StarterInfo } from "@/lib/keeper";
-import { KEYS, NO_PROMOS, NO_STARTER, readLocal, saveLocal, useLocal, type MyPromo } from "@/lib/local";
+import { keeper, KeeperError, type PriceRequest, type Quoted } from "@/lib/keeper";
+import { KEYS, NO_PROMOS, readLocal, saveLocal, useLocal, type MyPromo } from "@/lib/local";
 import { coverTitle } from "@/lib/promo";
 import { useWallet, WalletError, type Words } from "@/lib/wallet";
 
@@ -59,13 +61,7 @@ const NOT_CHARGED = "The payment didn't go through. You were not charged.";
 const EXPIRED = "That price expired. Here is the current one.";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// The keeper's answers when the login is no good: the email step comes back, as on the claim page.
-const LOGIN_AGAIN = new Set(["login", "not-your-wallet"]);
 const DOLLAR = 1_000_000n;
-const CENT = 10_000n;
-
-/** The keeper's starter test dollars: undefined while it is being asked, null when it gives none (or is too old to). */
-type Starter = StarterInfo | null | undefined;
 
 /**
  * Our words on Circle's two screens. What cannot be changed: the signing screen keeps the lead-in
@@ -110,6 +106,7 @@ type PaySheetProps = {
 
 export function PaySheet({ order, most, onFit, onClose }: PaySheetProps) {
   const wallet = useWallet();
+  const account = useAccount();
   const router = useRouter();
   const session = wallet.session;
   const business = useLocal<string>(KEYS.business, "");
@@ -119,40 +116,24 @@ export function PaySheet({ order, most, onFit, onClose }: PaySheetProps) {
   const cover = order.cover !== undefined;
   const title = order.cover ? coverTitle(order.request.payoutPerClaim, business, order.cover.condition) : order.title;
   const thing = cover ? "cover" : "promo";
-  const [starter, setStarter] = useState<Starter>(undefined);
-
-  // Whether the keeper gives starter test dollars, asked once per sheet so the answer is there by the time
-  // a balance turns out short. A keeper that is slow, unreachable or older than them gives none.
-  useEffect(() => {
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 8000);
-    keeper
-      .health(controller.signal)
-      .then(
-        (health) => setStarter(health.starter ?? null),
-        () => setStarter(null),
-      )
-      .finally(() => window.clearTimeout(timer));
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, []);
+  const settle = account.settle;
 
   /** The balance, then a fresh signed price. Ends in "short", "confirm" or "error". */
   const prepare = useCallback(
     async (note?: string) => {
       if (!address) return;
       try {
-        const balance = await usdcBalance(address);
+        // Test dollars that are on their way to a new account are waited for first.
+        const balance = await settle();
+        if (balance === null) return;
         const shown = BigInt(order.shownCost);
-        if (balance < shown + FEE_BUFFER) {
+        if (isShort(balance, shown)) {
           setPhase({ name: "short", balance, cost: shown });
           return;
         }
         const quoted = await keeper.quote({ ...order.request, merchant: address, item: order.item, business, hedgeMode: cover });
         const cost = BigInt(quoted.quote.premium);
-        if (balance < cost + FEE_BUFFER) setPhase({ name: "short", balance, cost });
+        if (isShort(balance, cost)) setPhase({ name: "short", balance, cost });
         else {
           const seconds = Math.max(quoted.quote.expiry - Math.floor(Date.now() / 1000), 1);
           setPhase({ name: "confirm", quoted, note, seconds });
@@ -163,7 +144,7 @@ export function PaySheet({ order, most, onFit, onClose }: PaySheetProps) {
         setPhase({ name: "error", message });
       }
     },
-    [address, business, order, cover],
+    [address, business, order, cover, settle],
   );
 
   // Once the merchant is logged in and the shop has a name, the sheet moves on by itself.
@@ -249,7 +230,15 @@ export function PaySheet({ order, most, onFit, onClose }: PaySheetProps) {
       {!session ? (
         <div className="space-y-3">
           <p className="text-[15px]">Enter your email. We&apos;ll send a 6-digit code.</p>
-          <EmailStep cta="Continue" hint="No password. Your promos are kept under this email." onDone={() => undefined} />
+          <EmailStep
+            cta="Continue"
+            hint={
+              account.offered && account.starter
+                ? `No password. A new account gets ${usd(account.starter.amount)} in test dollars to pay with.`
+                : "No password. Your promos are kept under this email."
+            }
+            onDone={() => undefined}
+          />
         </div>
       ) : business === "" ? (
         <BusinessStep cover={cover} />
@@ -259,7 +248,6 @@ export function PaySheet({ order, most, onFit, onClose }: PaySheetProps) {
           order={order}
           title={title}
           address={session.address}
-          starter={starter}
           most={most}
           onPay={pay}
           onAgain={() => again()}
@@ -299,7 +287,6 @@ type StepsProps = {
   /** The headline: what is free, or what the business gets. */
   title: string;
   address: string;
-  starter: Starter;
   most: number;
   onPay: (quoted: Quoted) => void;
   onAgain: () => void;
@@ -308,9 +295,11 @@ type StepsProps = {
   onClose: () => void;
 };
 
-function Steps({ phase, order, title, address, starter, most, onPay, onAgain, onFit, onClose }: StepsProps) {
+function Steps({ phase, order, title, address, most, onPay, onAgain, onFit, onClose }: StepsProps) {
+  const account = useAccount();
   const cover = order.cover !== undefined;
   if (phase.name === "checking") {
+    if (account.grant.state === "asking") return <Spinner line="Adding your test dollars" />;
     return (
       <div className="space-y-2">
         {phase.note && <p className="text-[15px]">{phase.note}</p>}
@@ -326,7 +315,6 @@ function Steps({ phase, order, title, address, starter, most, onPay, onAgain, on
         cost={phase.cost}
         address={address}
         order={order}
-        starter={starter}
         most={most}
         onAgain={onAgain}
         onFit={onFit}
@@ -376,14 +364,7 @@ function Steps({ phase, order, title, address, starter, most, onPay, onAgain, on
     );
   }
 
-  if (phase.name === "paying") {
-    return (
-      <div className="flex items-center gap-3 py-4" role="status">
-        <span className="size-4 animate-spin rounded-full border-2 border-line border-t-ink" />
-        <span className="text-[16px]">{phase.line}</span>
-      </div>
-    );
-  }
+  if (phase.name === "paying") return <Spinner line={phase.line} />;
 
   return (
     <div className="space-y-4">
@@ -395,13 +376,21 @@ function Steps({ phase, order, title, address, starter, most, onPay, onAgain, on
   );
 }
 
+function Spinner({ line }: { line: string }) {
+  return (
+    <div className="flex items-center gap-3 py-4" role="status">
+      <span className="size-4 animate-spin rounded-full border-2 border-line border-t-ink" />
+      <span className="text-[16px]">{line}</span>
+    </div>
+  );
+}
+
 type AddMoneyProps = {
   balance: bigint;
   /** What this promo or cover costs. */
   cost: bigint;
   address: string;
   order: Order;
-  starter: Starter;
   /** The most customers the form allows right now. */
   most: number;
   /** Reads the balance again, and moves on to Pay when it is enough. */
@@ -415,21 +404,18 @@ type AddMoneyProps = {
 type Advice = { text: string; fit: { label: string; size: Fit } | null };
 
 /**
- * What to change on the form so a short balance fits. The cost grows about in step with the size, so the
- * balance's share of it is the size that fits; a cent is held back because a smaller price is rounded up
- * to a cent too. The balance is short of `cost`, so the size offered is always below the one asked for,
- * and a press can never land on the same size again. The text and the button carry the same number.
+ * What to change on the form so a short balance fits (`lib/fit.ts`). The balance is short of `cost`, so the
+ * size offered is always below the one asked for, and a press can never land on the same size again. The
+ * text and the button carry the same number.
  */
-function whatFits(spendable: bigint, cost: bigint, order: Order, most: number): Advice {
-  const budget = spendable > CENT ? spendable - CENT : 0n;
+function whatFits(balance: bigint, cost: bigint, order: Order, most: number): Advice {
   if (order.cover !== undefined) {
-    // In whole dollars, rounded down.
-    const amount = ((budget * BigInt(order.request.payoutPerClaim)) / cost / DOLLAR) * DOLLAR;
+    const amount = amountFor(balance, cost, BigInt(order.request.payoutPerClaim));
     if (amount < DOLLAR) return { text: "Your balance is too low for this amount. Lower it and try again.", fit: null };
     return { text: `Your balance covers about ${usd(amount)}.`, fit: { label: `Make it ${usd(amount)}`, size: { amount } } };
   }
   // Never above what the form allows (it allows at least 1).
-  const customers = Math.min(Number((budget * BigInt(order.request.maxClaims)) / cost), Math.max(most, 1));
+  const customers = Math.min(customersFor(balance, cost, order.request.maxClaims), Math.max(most, 1));
   if (customers < 1) {
     return { text: "Your balance doesn't cover one customer. Lower the item's price, or pick the other team.", fit: null };
   }
@@ -438,70 +424,41 @@ function whatFits(spendable: bigint, cost: bigint, order: Order, most: number): 
 }
 
 /**
- * The balance is short. With starter test dollars on offer (and not had yet by this account), that comes
- * first; otherwise how to add money, and, once the starter dollars were had or when they are not on offer
- * and the account holds something, what fits, with a button that sets the form to it.
+ * The balance is short. An account that can still have its starter test dollars (the page asks for them at
+ * login, so this is one whose grant did not go through) is offered them again; otherwise what fits, with a
+ * button that sets the form to it, and how to add money.
  */
-function AddMoney({ balance, cost, address, order, starter, most, onAgain, onFit, onClose }: AddMoneyProps) {
-  const wallet = useWallet();
-  const had = useLocal<Record<string, true>>(KEYS.starter, NO_STARTER)[address.toLowerCase()] === true;
+function AddMoney({ balance, cost, address, order, most, onAgain, onFit, onClose }: AddMoneyProps) {
+  const account = useAccount();
   const [open, setOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [asking, setAsking] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
   const cover = order.cover !== undefined;
   const thing = cover ? "cover" : "promo";
   const missing = cost + FEE_BUFFER - balance;
+  const message = account.grant.state === "failed" ? (account.grant.message ?? null) : null;
 
-  async function getStarter() {
-    const session = wallet.session;
-    if (!session) return;
-    const remember = () =>
-      saveLocal(KEYS.starter, { ...readLocal<Record<string, true>>(KEYS.starter, NO_STARTER), [session.address.toLowerCase()]: true });
-    setAsking(true);
-    try {
-      // The login token goes with it: the keeper asks Circle whose account this is, as for a claim.
-      await keeper.starter(session.address, session.userToken);
-      remember();
-      onAgain();
-    } catch (err) {
-      setAsking(false);
-      if (err instanceof KeeperError && LOGIN_AGAIN.has(err.code)) {
-        // Forgotten, so the email step is there again; the sheet picks up after it.
-        wallet.logout();
-        return;
-      }
-      if (err instanceof KeeperError && err.code === "already") remember();
-      setMessage(err instanceof KeeperError ? err.message : "Something went wrong. Try again in a moment.");
-    }
-  }
+  // Asked once per page; it is almost always back before the balance is.
+  if (account.starter === undefined) return <p className="text-[15px] text-ink/60">Checking the price…</p>;
+  if (account.grant.state === "asking") return <Spinner line="Adding your test dollars" />;
 
-  // Asked once per sheet; it is almost always back before the balance is.
-  if (starter === undefined) return <p className="text-[15px] text-ink/60">Checking the price…</p>;
-
-  if (asking) {
-    return (
-      <div className="flex items-center gap-3 py-4" role="status">
-        <span className="size-4 animate-spin rounded-full border-2 border-line border-t-ink" />
-        <span className="text-[16px]">Getting your test dollars</span>
-      </div>
-    );
-  }
-
-  if (starter !== null && starter.left > 0 && !had && message === null && balance < BigInt(starter.amount)) {
-    const amount = usd(starter.amount);
+  if (account.offered && account.starter) {
+    const amount = usd(account.starter.amount);
     return (
       <div className="space-y-4">
-        <p className="text-[15px]">This demo runs on test dollars. You can get {amount} to try it, once per email.</p>
-        <Button onClick={() => void getStarter()}>Get {amount} in test dollars</Button>
+        {message ? (
+          <p role="alert" className="text-[15px]">
+            {message}
+          </p>
+        ) : (
+          <p className="text-[15px]">This demo runs on test dollars. You can get {amount} to try it, once per email.</p>
+        )}
+        <Button onClick={() => void account.claim().then(onAgain)}>Get {amount} in test dollars</Button>
       </div>
     );
   }
 
-  // What to change on the form so it fits: after the starter dollars still fall short, or when they are
-  // not on offer and the account holds something to size against. An empty account only sees how to add money.
-  const spendable = balance > FEE_BUFFER ? balance - FEE_BUFFER : 0n;
-  const advice = cost > 0n && (had || spendable > 0n) ? whatFits(spendable, cost, order, most) : null;
+  // What to change on the form so it fits: for an account that has had its test dollars, or holds something
+  // to size against. An empty account that can have none only sees how to add money.
+  const advice = cost > 0n && (account.had || balance > FEE_BUFFER) ? whatFits(balance, cost, order, most) : null;
   const fit = advice?.fit ?? null;
 
   return (
@@ -528,18 +485,7 @@ function AddMoney({ balance, cost, address, order, starter, most, onAgain, onFit
           Add money
         </Button>
       ) : (
-        <div className="space-y-3 rounded-[10px] border border-line bg-card p-4 text-[15px]">
-          <p>Card payments are coming. For this demo, send test dollars to your account&apos;s address:</p>
-          <p className="num break-all text-[13px]">{address}</p>
-          <Button
-            variant="secondary"
-            onClick={() => {
-              void navigator.clipboard.writeText(address).then(() => setCopied(true));
-            }}
-          >
-            {copied ? "Copied" : "Copy address"}
-          </Button>
-        </div>
+        <AddressBox address={address} />
       )}
       <Button variant={open && !advice ? "primary" : "secondary"} onClick={onAgain}>
         Check again

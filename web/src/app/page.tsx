@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { SiteFooter } from "@/components/mechanics";
 import { ReceiptCard } from "@/components/receipt-card";
+import { StarterNote } from "@/components/starter-note";
 
 const STEPS = [
   ["Pick a game and a team", "Tonight's games, each team with its chance of winning."],
@@ -32,6 +33,7 @@ export default function Home() {
             >
               Run a promo
             </Link>
+            <StarterNote />
           </div>
           <ReceiptCard
             state="covered"
