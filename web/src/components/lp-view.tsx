@@ -134,8 +134,8 @@ export function LpView() {
         <div>
           <h1 className="text-[26px] font-semibold leading-tight tracking-tight">FreeIf vault</h1>
           <p className="mt-1 max-w-[560px] text-[15px] text-ink/60">
-            Deposits underwrite merchant promos. The vault keeps the premium when a promo&apos;s result is &ldquo;no&rdquo; and pays the
-            promo&apos;s customers when it is &ldquo;yes&rdquo;.
+            The vault is a shared pot of money that backs shops&apos; promos. A shop pays a fee to run a promo. If the promo wins, the
+            vault pays the shop&apos;s customers. If it doesn&apos;t, the vault keeps the fee. Everyone who puts money in shares both.
           </p>
         </div>
         <div className="shrink-0 text-right">
@@ -384,64 +384,48 @@ function walletMessage(err: unknown): string {
 }
 
 /**
- * What one share is worth, as a sum: the part that is available now, the part locked in open promos, and
- * the two together. A withdrawal is paid the first and a deposit pays the total, so the vault's two share
- * prices are two lines of one sum. The locked part is the total less the available part, so the three
- * numbers always add up as shown.
+ * The same thing counted the way the contract counts it: in shares. Folded away, because the card above
+ * it says everything in dollars. A share's worth is a sum (available now, plus locked in open promos); a
+ * withdrawal is paid the first line and a deposit pays the last. The locked part is the total less the
+ * available part, so the three numbers always add up as shown.
  */
-function ShareWorth({ free, basis, totalShares, tab }: { free: bigint; basis: bigint; totalShares: bigint; tab: "deposit" | "withdraw" }) {
+function InShares({ free, basis, totalShares, shares, moving }: { free: bigint; basis: bigint; totalShares: bigint; shares: bigint | null; moving: string | null }) {
   const available = priceUnits(free, totalShares);
   const total = priceUnits(basis, totalShares);
   const lockedPart = total - available;
-
-  if (lockedPart <= 0n) {
-    return (
-      <div className="border-t border-line pt-3">
-        <h3 className="label">One share is worth</h3>
-        <p className="num mt-1 text-[16px]">{price(available)}</p>
-        <p className="mt-1 text-[13px] text-ink/60">
-          Nothing is locked in a promo right now, so a deposit and a withdrawal use the same price.
-        </p>
-      </div>
-    );
-  }
-
-  const row = "flex items-baseline justify-between gap-4 py-2";
+  const row = "flex items-baseline justify-between gap-4 py-1.5";
   return (
-    <div className="border-t border-line pt-3">
-      <h3 className="label">One share is worth</h3>
-      <dl className="mt-1 divide-y divide-line text-[14px]">
-        <div className={row}>
-          <dt>
-            Available now
-            <span className="block text-[12px] text-ink/60">What a withdrawal receives for each share.</span>
-          </dt>
-          <dd className={`num shrink-0 text-[16px] ${tab === "withdraw" ? "font-semibold" : ""}`}>{price(available)}</dd>
-        </div>
-        <div className={row}>
-          <dt>
-            Locked in open promos
-            <span className="block text-[12px] text-ink/60">
-              Comes back to the share when a promo ends &ldquo;no&rdquo;. Pays the customers when it ends &ldquo;yes&rdquo;.
-            </span>
-          </dt>
-          <dd className="num shrink-0 text-[16px]">+ {price(lockedPart)}</dd>
-        </div>
-        <div className={row}>
-          <dt>
-            Both together
-            <span className="block text-[12px] text-ink/60">
-              What a deposit pays for each share, so new money cannot buy locked money for less than it may be worth.
-            </span>
-          </dt>
-          <dd className={`num shrink-0 text-[16px] ${tab === "deposit" ? "font-semibold" : ""}`}>= {price(total)}</dd>
-        </div>
-      </dl>
-    </div>
+    <details className="border-t border-line pt-3 text-[14px]">
+      <summary className="cursor-pointer text-ink/60 underline underline-offset-2">The same thing, counted in shares</summary>
+      <p className="mt-2 text-ink/70">
+        The vault keeps track of everyone&apos;s part in shares.{shares !== null ? ` This wallet holds ${shareCount(shares)}.` : ""}
+      </p>
+      {lockedPart <= 0n ? (
+        <p className="mt-2 text-ink/70">
+          One share is worth <span className="num text-ink">{price(available)}</span>, to put in or to take out: nothing is locked right now.
+        </p>
+      ) : (
+        <dl className="mt-2 divide-y divide-line">
+          <div className={row}>
+            <dt>One share, available now (what taking out pays)</dt>
+            <dd className="num shrink-0">{price(available)}</dd>
+          </div>
+          <div className={row}>
+            <dt>Its part of what is locked in open promos</dt>
+            <dd className="num shrink-0">+ {price(lockedPart)}</dd>
+          </div>
+          <div className={row}>
+            <dt>Both together (what putting in costs)</dt>
+            <dd className="num shrink-0">= {price(total)}</dd>
+          </div>
+        </dl>
+      )}
+      {moving && <p className="num mt-2 text-ink/70">{moving}</p>}
+    </details>
   );
 }
 
-/** Deposit and withdraw. A share's worth is shown in its two parts, because they are priced differently. */
+/** Deposit and withdraw, said in dollars. The shares behind them are in a fold (`InShares`). */
 function Trade({
   vault,
   account,
@@ -479,6 +463,12 @@ function Trade({
   const burned = amount === null || free === 0n ? 0n : amount >= wholeCents ? shares : (amount * totalShares + free - 1n) / free;
   const received = totalShares === 0n ? 0n : (burned * free) / totalShares;
   const leftBehind = totalShares === 0n ? 0n : (burned * pending) / totalShares;
+
+  // A deposit joins the whole vault, so part of it sits behind the promos that are open. What the new
+  // shares could take out again at once, down to the cent; the rest of the amount is the locked part.
+  const afterShares = totalShares + minted;
+  const backNow = amount === null || afterShares === 0n ? 0n : (((minted * (free + amount)) / afterShares) / 10_000n) * 10_000n;
+  const goesLocked = amount === null || amount < backNow ? 0n : amount - backNow;
 
   const spendable = held ? (held.balance > FEE_BUFFER ? held.balance - FEE_BUFFER : 0n) : 0n;
   const problem =
@@ -537,12 +527,15 @@ function Trade({
 
       <div className="space-y-4 p-4">
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-4">
-          <Fact label="Your shares" value={held ? shareCount(shares) : "–"} />
-          <Fact label="Share of vault" value={held ? percent(shares, totalShares) : "–"} />
-          <Fact label="Withdrawable now" value={held ? usd(withdrawable) : "–"} />
-          <Fact label="Yours in open promos" value={held ? usd(inLocks) : "–"} />
+          <Fact label="Your money here" value={held ? usd(withdrawable + inLocks) : "–"} />
+          <Fact label="You can take out now" value={held ? usd(withdrawable) : "–"} />
+          <Fact label="Locked in open promos" value={held ? usd(inLocks) : "–"} />
+          <Fact label="Your part of the vault" value={held ? percent(shares, totalShares) : "–"} />
         </dl>
-        <ShareWorth free={free} basis={basis} totalShares={totalShares} tab={tab} />
+        <p className="border-t border-line pt-3 text-[14px] text-ink/70">
+          Money is locked while a promo it backs is still open. If the promo ends with nothing to pay, that money can be taken out again
+          and the vault keeps the shop&apos;s fee. If the promo wins, that money goes to the shop&apos;s customers.
+        </p>
 
         <div>
           <label className="label mb-1 block" htmlFor="lp-amount">
@@ -572,9 +565,11 @@ function Trade({
           {amount !== null && !problem && (
             <p className="num mt-2 text-[14px] text-ink/60">
               {tab === "deposit"
-                ? `You get ${shareCount(minted)} shares at ${price(priceUnits(basis, totalShares))} each.`
-                : `You burn ${shareCount(burned)} shares at ${price(priceUnits(free, totalShares))} each and receive ${usd(received)}.${
-                    leftBehind > 0n ? ` Their ${usd(leftBehind)} in open promos stays in the vault, with the shares that remain.` : ""
+                ? pending === 0n
+                  ? `Nothing is locked right now, so all ${usd(amount)} can be taken out again whenever you like.`
+                  : `Of your ${usd(amount)}, ${usd(backNow)} can be taken out again right away. ${usd(goesLocked)} is locked in the promos that are open now.`
+                : `You receive ${usd(received)}.${
+                    leftBehind > 0n ? ` You leave behind ${usd(leftBehind)} that is locked in open promos: it stays with the people who keep their money in.` : ""
                   }`}
             </p>
           )}
@@ -596,7 +591,8 @@ function Trade({
         )}
         {tab === "withdraw" && pending > 0n && (
           <p className="text-[14px] text-ink/60">
-            To keep the locked part, wait: it becomes available when its promos end &ldquo;no&rdquo;. Shares that stay keep their part of it.
+            Locked money can&apos;t be taken out yet. Take your money out now and you give up your part of it. Wait until the open promos
+            end and you keep it.
           </p>
         )}
         {error && (
@@ -612,6 +608,19 @@ function Trade({
             </a>
           </p>
         )}
+        <InShares
+          free={free}
+          basis={basis}
+          totalShares={totalShares}
+          shares={held ? shares : null}
+          moving={
+            amount === null || problem
+              ? null
+              : tab === "deposit"
+                ? `${usd(amount)} put in buys ${shareCount(minted)} shares at ${price(priceUnits(basis, totalShares))} each.`
+                : `${usd(received)} taken out sells ${shareCount(burned)} shares at ${price(priceUnits(free, totalShares))} each.`
+          }
+        />
       </div>
     </section>
   );
