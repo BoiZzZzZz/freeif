@@ -79,7 +79,7 @@ A promo sold with claim cards (the keeper says so per promo: `cards` in `GET /pr
 
 `/lp` reads `GET /vault` from the keeper (one read of the chain, shared) and keeps `GET /events` open, so the numbers move when something happens on the vault. A deposit is up to two confirmations in the wallet (an approval for exactly the amount, then `deposit`); a withdrawal is one (`withdraw`). Both calls are simulated against the chain before the wallet is asked.
 
-The page shows two share prices because the vault has two. A deposit is priced on what is available plus the locks of promos still running, the most the shares can be worth. A withdrawal is priced on what is available alone, the least. They differ whenever a promo is open, so before a withdrawal the page says how much is received and how much "stays behind in open promos": that part goes to the providers who stay if those promos end "no".
+The vault has two share prices, and the page shows them as one sum under "One share is worth": the part that is available now, plus the part locked in open promos, equals both together. A withdrawal receives the first line for each share, the least the shares can be worth; a deposit pays the last, the most. The locked part is shown as the total less the available part, so the three numbers always add up. With nothing locked the page shows one price. Before a withdrawal the page says how much is received and how much "stays in the vault, with the shares that remain": that part goes to the providers who stay if those promos end "no".
 
 ## Run it
 
