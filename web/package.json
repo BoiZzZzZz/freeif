@@ -9,7 +9,8 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "abi": "node scripts/copy-abi.mjs",
-    "check:pay": "tsx --tsconfig tsconfig.json scripts/pay-check.ts"
+    "check:pay": "tsx --tsconfig tsconfig.json scripts/pay-check.ts",
+    "check:plan": "tsx --tsconfig tsconfig.json scripts/plan-check.ts"
   },
   "dependencies": {
     "@circle-fin/w3s-pw-web-sdk": "1.1.11",

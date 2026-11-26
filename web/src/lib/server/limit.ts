@@ -38,6 +38,11 @@ export function clientOf(request: Request): string {
   return request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
 }
 
+/**
+ * The routes under /api/plan together. Each can cost a read of an exchange's public data; an open plan
+ * page asks about four times a minute, and a voucher twice.
+ */
+export const PLAN_ROUTES: Rule = { name: "plan", max: 120, windowMs: 60_000 };
 /** Every route under /api/wallet together: a payment asks about its transaction every 1.5 seconds. */
 export const EVERY_ROUTE: Rule = { name: "wallet", max: 240, windowMs: 60_000 };
 /**

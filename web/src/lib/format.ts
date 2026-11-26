@@ -33,6 +33,9 @@ export const timeOf = (unix: number): string => clock.format(new Date(unix * 100
 /** "Tue 7:15 PM". */
 export const dayTime = (unix: number): string => `${weekday.format(new Date(unix * 1000))} ${timeOf(unix)}`;
 
+/** "Fri, Nov 27". */
+export const dateOf = (unix: number): string => `${weekday.format(new Date(unix * 1000))}, ${monthDay.format(new Date(unix * 1000))}`;
+
 /** The heading a game is listed under: "Today", "Tonight", "Tomorrow", or "Sun, Nov 15". */
 export function dayHeading(unix: number, now = Date.now()): string {
   const date = new Date(unix * 1000);

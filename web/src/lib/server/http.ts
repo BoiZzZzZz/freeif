@@ -3,6 +3,7 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { connection } from "next/server";
 import { clientOf, EVERY_ROUTE, take, type Rule } from "./limit";
 
 export class Refusal extends Error {
@@ -38,6 +39,31 @@ export function post(
       const body = (await request.json().catch(() => null)) as Body | null;
       if (body === null || typeof body !== "object") throw new Refusal(400, "bad-request", "The request was not understood.");
       return Response.json(await run(body));
+    } catch (err) {
+      if (err instanceof Refusal) {
+        return Response.json({ error: { code: err.code, message: err.message } }, { status: err.status });
+      }
+      console.error("[api]", err);
+      return Response.json(
+        { error: { code: "internal", message: "Something went wrong on our side. Try again in a moment." } },
+        { status: 500 },
+      );
+    }
+  };
+}
+
+/**
+ * Wraps a GET handler that answers per request: counts the request against `rule`, hands the handler the
+ * query, and turns a thrown `Refusal` into its response, in the same shape as `post`.
+ */
+export function get(run: (query: URLSearchParams) => Promise<unknown>, rule: Rule): (request: Request) => Promise<Response> {
+  return async (request) => {
+    // Never answered from a build: the answer is the exchange's price at this moment. Outside the `try`,
+    // because during a build this is how Next learns the route is answered per request.
+    await connection();
+    try {
+      if (take(rule, clientOf(request)) > 0) throw new Refusal(429, "too-many", TOO_MANY);
+      return Response.json(await run(new URL(request.url).searchParams), { headers: { "cache-control": "no-store" } });
     } catch (err) {
       if (err instanceof Refusal) {
         return Response.json({ error: { code: err.code, message: err.message } }, { status: err.status });

@@ -10,9 +10,11 @@ The FreeIf app: Next.js 16 (App Router), React 19, Tailwind 4, viem, `qrcode.rea
 | `/promo/[id]/print` | The counter sign with the code, printed from the browser. For a card promo it is an ad, "Free if ... Ask for your card", whose code opens the promo's public page |
 | `/promo/[id]/cards` | A card promo's merchant: makes the cards in this browser, gets them ready, and prints them (below, "Claim cards") |
 | `/card/[promoId]#<key>` | A claim card, scanned: what it is worth and when, the result, and Collect |
+| `/plan` | A bar that covers its own promo night on an exchange: a game and a team, what is free, how many customers; the page says what one order on Kalshi costs, and prints the vouchers (below, "A night the bar covers itself") |
+| `/voucher?t=...` | A printed voucher, scanned: the game, and once it is over whether the voucher is good |
 | `/lp` | A liquidity provider: what the vault holds, how much of it is locked, what it has earned, both share prices, deposit and withdraw, every promo with what it locks and what it made, each open promo's chance now and its hedge order, the risks, and the vault's activity |
 
-Merchant and customer screens never say prediction market, USDC, wallet or gas. `/lp` is the one page that does, and the one page that uses a browser wallet (MetaMask and the like) instead of the email login. The footer link "See how it works under the hood" (or `?mechanics=1` in a link) turns on the mechanics view, which shows where each number comes from.
+Merchant and customer screens never say prediction market, USDC, wallet or gas. `/plan` names Kalshi and speaks of contracts, because its owner types those words into Kalshi's own screen. `/lp` is the one page that speaks DeFi, and the one page that uses a browser wallet (MetaMask and the like) instead of the email login. The footer link "See how it works under the hood" (or `?mechanics=1` in a link) turns on the mechanics view, which shows where each number comes from.
 
 ## How it talks to the rest
 
@@ -75,6 +77,18 @@ A promo sold with claim cards (the keeper says so per promo: `cards` in `GET /pr
 - **Collect.** The holder logs in by email (the same login as everywhere else) and their browser sends the card's balance to their own account, signed with the card's key: no Circle screen, because the card is not a Circle account. The card pays its own network fee from its balance: the browser estimates the gas, adds 20%, and sends the balance less `ceil(gas limit × max fee / 10^12)` with exactly that gas limit and max fee. A fraction of a cent stays on the card. Then the account has Cash out, as for any paid customer.
 - **The key never leaves the browser.** It is in the address bar after the `#`, in the page's memory, and in the merchant's `localStorage`; no request carries it (checked in headless Chrome on the production build: every request's address, headers and body).
 
+## A night the bar covers itself
+
+`/plan` is the same promo without the vault. Nothing on it logs in, pays or signs: the bar places one order in its own Kalshi account, and gives the free item itself.
+
+- **The list.** `GET /api/plan/games?league=nba` (also `nhl`, `nfl`) is Kalshi's open game-winner markets that have not started, up to 8 days ahead. It is three reads of Kalshi's public API, no key: the open events with their two markets (`/events?series_ticker=KXNBAGAME&with_nested_markets=true`), the schedule (`/milestones?competition=NBA`: a market does not say when its game starts or who is at home), and the teams (`/structured_targets`). A team's nickname is in the schedule for football, in the team list for hockey, and in both for basketball. The server does the reading because Kalshi's API answers 403 to a browser on this site's origin.
+- **The order.** `GET /api/plan/books?ticker=...` is one team's offers. Kalshi lists bids only, so an offer of "yes" at 61 cents is a "no" bid at 39, turned around. The page buys the promo's size from the offers, cheapest first (`order` in `src/lib/plan.ts`): one contract pays $1.00 if the team wins, so 50 customers at $8.00 is 400 contracts. The limit price is the dearest offer the order needs. The fee is Kalshi's schedule: 7% of contracts × price × (1 − price), rounded up to a cent, times the series' `fee_multiplier`. The books are read again every 15 seconds, and changing the number of customers asks nothing new.
+- **The other exchange.** When the same game is found on Polymarket US (same start, same two nicknames; `gateway.polymarket.us`, public, no key), the card says what the same order costs there. It lists one market per game: the away team is its "long" side, and the home team is bought from the bids. Its fee rate is the one its market reports.
+- **The vouchers.** Printed eight to a page, numbered, one per customer. A voucher's code opens `/voucher` with everything the voucher says in the address, and the page reads the game's result from Kalshi (`GET /api/plan/voucher?ticker=...`). The bar honors a voucher and keeps the paper: nothing stops a copied code from showing the same result, and the page pays nobody.
+- **What it costs the owner.** The order's cost and fee, win or lose. If the team wins, Kalshi pays $1.00 a contract into the bar's Kalshi account, which is the menu price of what the bar gives away (or, with "Cover only what one costs me to make", its cost).
+
+`pnpm check:plan` checks the arithmetic on fixed books (Kalshi's own fee table among them), then reads both exchanges for all three leagues, works out a 400-contract order on each, and reads a voucher's market. Tickers given after it are games with a result: `pnpm check:plan KXNBAGAME-26NOV24DALDEN-DAL`.
+
 ## The vault page
 
 `/lp` reads `GET /vault` from the keeper (one read of the chain, shared) and keeps `GET /events` open, so the numbers move when something happens on the vault. A deposit is up to two confirmations in the wallet (an approval for exactly the amount, then `deposit`); a withdrawal is one (`withdraw`). Both calls are simulated against the chain before the wallet is asked.
@@ -92,6 +106,7 @@ pnpm build
 pnpm lint
 pnpm typecheck
 pnpm check:pay      # the server side of Pay against Arc and the hosted keeper; nothing is sent
+pnpm check:plan     # the plan page's arithmetic, and its reads of Kalshi and Polymarket US; no key, nothing is sent
 pnpm abi            # copy the vault's ABI from ../keeper after a contract change
 ```
 
@@ -129,9 +144,15 @@ The site lists games and temperatures only. The 5-minute BTC markets, which sett
 | `src/components/odds-chart.tsx`, `src/lib/use-odds.ts` | The chart on the promo page, and the readings behind it |
 | `src/lib/promo.ts`, `format.ts` | A promo in words; money and times as people read them |
 | `src/lib/server/` | Circle's API, the chain reads, the permit and the promo call, and the limit on how often one address may call the routes |
+| `src/components/plan/`, `voucher-view.tsx` | The plan page (its game list, the order card, the printed vouchers) and the page a scanned voucher opens |
+| `src/lib/plan.ts`, `plan-client.ts` | A plan's shapes and arithmetic (the size in contracts, the order from a book, the fee, a voucher's link), and the page's reads of `/api/plan` |
+| `src/lib/server/kalshi.ts`, `polymarket.ts`, `plan-data.ts`, `kept.ts` | Kalshi's and Polymarket US's public market data, the two joined into what the page asks for, and the short memory that keeps a busy page from multiplying the reads |
 | `src/lib/abi.ts` | Copied from the keeper |
 
 ## Known limits
+
+- `/plan` shows prices; it does not hold one. The order's cost is what the offers on Kalshi's book would cost at the moment it was read, and it moves until the owner places the order. Two days before a game a book can be a few hundred contracts deep where on game day it is hundreds of thousands, and the card says so when an order is bigger than what is offered.
+- `/plan`'s reads are limited to 120 a minute per address and kept in the server's memory for a few seconds (a book 3, a game list 20, a schedule 5 minutes). Like the other limits here they are per copy of the server.
 
 - The `/api/wallet` routes are limited per address (`src/lib/server/limit.ts`): 240 calls a minute over all of them, and 20 login codes in ten minutes, each code being an email to whatever address was typed. The counts are in the server's memory and Vercel can run more than one copy of the server, so this stops a loop, not a determined sender. Circle has its own limit on the codes sent to one email address.
 - The claim page sends the customer's login token to the keeper with the claim, and the keeper asks Circle whose it is: one claim per login per promo, for that login's own account. The token is a credential for an hour; it goes to the keeper over HTTPS and is not stored there.
