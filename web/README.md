@@ -10,7 +10,7 @@ The FreeIf app: Next.js 16 (App Router), React 19, Tailwind 4, viem, `qrcode.rea
 | `/promo/[id]/print` | The counter sign with the code, printed from the browser. For a card promo it is an ad, "Free if ... Ask for your card", whose code opens the promo's public page |
 | `/promo/[id]/cards` | A card promo's merchant: makes the cards in this browser, gets them ready, and prints them (below, "Claim cards") |
 | `/card/[promoId]#<key>` | A claim card, scanned: what it is worth and when, the result, and Collect |
-| `/plan` | A bar that covers its own promo night on an exchange: a game and a team, what is free, how many customers; the page says what one order on Kalshi costs, and prints the vouchers (below, "A night the bar covers itself") |
+| `/plan` | A bar that covers its own promo night on an exchange: what is free, how many customers, then a game and a team; the page says what one order on Kalshi costs, and prints the vouchers (below, "A night the bar covers itself") |
 | `/voucher?t=...` | A printed voucher, scanned: the game, and once it is over whether the voucher is good |
 | `/lp` | A liquidity provider: what the vault holds, how much of it is locked, what it has earned, both share prices, deposit and withdraw, every promo with what it locks and what it made, each open promo's chance now and its hedge order, the risks, and the vault's activity |
 

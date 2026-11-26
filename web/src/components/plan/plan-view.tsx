@@ -1,8 +1,8 @@
 "use client";
 
-// /plan: a "free if they win" night the bar covers itself. The owner picks a game and a team, says what
-// is free and for how many customers, and the page reads the exchange's offers and says what one order
-// costs: so many contracts of the team, each paying a dollar if it wins. The owner places that order in
+// /plan: a "free if they win" night the bar covers itself. The owner says what is free and for how many
+// customers, then picks a game and a team, and the page reads the exchange's offers and says what one
+// order costs: so many contracts of the team, each paying a dollar if it wins. The owner places that order in
 // their own Kalshi account; this app places nothing and holds nothing. Then it prints the vouchers.
 //
 // Unlike the merchant form, this page names the exchange and speaks of contracts: the owner has to type
@@ -35,6 +35,7 @@ const GOOD_FOR = [
 const NO_PRICE = "We can't get a live price right now. Try again in a moment.";
 
 const people = (n: number) => `${n} customer${n === 1 ? "" : "s"}`;
+const freeOrders = (n: number) => (n === 1 ? "one free order" : `${n} free orders`);
 
 const noop = () => () => {};
 const useOrigin = () =>
@@ -158,11 +159,8 @@ export function PlanView() {
 
         <div className="md:grid md:grid-cols-[minmax(0,1fr)_380px] md:gap-10">
           <div className="space-y-8">
-            <Step n={1} title="Which game, which team">
-              <GameList picked={pick} onPick={setPick} />
-            </Step>
-
-            <Step n={2} title="What's free">
+            {/* What is free and for how many come first: the price that a team brings up is then a price for something. */}
+            <Step n={1} title="What's free">
               <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 [scrollbar-width:none]">
                 {ITEMS.map((name) => (
                   <Button
@@ -211,7 +209,7 @@ export function PlanView() {
               {ownCost && each === null && <p className="text-[14px] text-stop">Enter what one costs you, like 3.00.</p>}
             </Step>
 
-            <Step n={3} title="How many customers">
+            <Step n={2} title="How many customers">
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center rounded-[10px] border border-line bg-card">
                   <button
@@ -241,6 +239,15 @@ export function PlanView() {
                 ))}
               </div>
               <p className="text-[15px] text-ink/60">You print {customers === 1 ? "one voucher" : `${customers} vouchers`} and hand one to each customer. One per customer.</p>
+            </Step>
+
+            <Step n={3} title="Which game, which team">
+              <p className="text-[15px] text-ink/60">
+                {each === null
+                  ? "Pick the team your customers win with."
+                  : `Pick the team your customers win with. You'll see what it costs to cover ${freeOrders(customers)} at ${usd(each)} each.`}
+              </p>
+              <GameList picked={pick} onPick={setPick} />
             </Step>
 
             <Step n={4} title="Your place">
@@ -318,6 +325,11 @@ export function PlanView() {
           <span>
             <span className="label block">Your cost today</span>
             <span className="num text-[20px] font-semibold leading-6">{usd(barCost)}</span>
+            {each !== null && (
+              <span className="block text-[13px] leading-4 text-ink/60">
+                {people(customers)} at <span className="num">{usd(each)}</span> each
+              </span>
+            )}
           </span>
           <a href="#order" className="inline-flex h-11 shrink-0 items-center justify-center rounded-[10px] bg-ink px-5 font-medium text-white">
             See your order
@@ -379,6 +391,13 @@ function OrderCard({ pick, started, loading, error, kalshi, other, customers, ea
           <span className="label">Your cost today</span>
           <span className="num text-[28px] font-semibold leading-8">{usd(total)}</span>
         </div>
+        {/* What the money is for, before how it is spent. */}
+        <p className="mt-1 text-[15px]">
+          {ownCost ? "To cover your cost of " : "To cover "}
+          {freeOrders(customers)} of {thing}
+          {ownCost ? ", " : " at "}
+          <span className="num">{usd(each)}</span> each{ownCost ? "," : ""} if the {team} win.
+        </p>
         <dl className="mt-3 space-y-1 text-[14px] text-ink/60">
           <div className="flex justify-between gap-4">
             <dt>
@@ -395,13 +414,13 @@ function OrderCard({ pick, started, loading, error, kalshi, other, customers, ea
         <div className="mt-4 space-y-1.5 border-t border-dashed border-line pt-4 text-[15px]">
           <p>
             <span className="font-medium">If the {team} win,</span> Kalshi pays you <span className="num">{usd(paid)}</span>
+            .
             {whole && (
               <>
-                : {ownCost ? "what" : "the menu price of"} {customers === 1 ? "one free order" : `${customers} free orders`} of {thing}
-                {ownCost ? ` cost${customers === 1 ? "s" : ""} you` : ""}
+                {" "}
+                That covers <span className="num">{customers}</span> × <span className="num">{usd(each)}</span>.
               </>
             )}
-            .
           </p>
           <p>
             <span className="font-medium">If they lose,</span> nothing comes back and you give nothing away.
