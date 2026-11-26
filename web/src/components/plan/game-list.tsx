@@ -87,6 +87,10 @@ export function GameList({ picked, onPick }: Props) {
       </div>
       <Input type="search" placeholder="Search a team or a city" aria-label="Search a team or a city" value={search} onChange={(e) => setSearch(e.target.value)} />
 
+      {loaded !== null && matching.length > 0 && (
+        <p className="text-[14px] text-ink/60">The number next to each team is its chance to win, from Kalshi&apos;s prices right now.</p>
+      )}
+
       {loaded === null && failed !== league && (
         <div className="space-y-2" aria-label="Loading games">
           {[0, 1, 2].map((i) => (
